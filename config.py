@@ -21,7 +21,7 @@ LANE_ID = "ENTRY_01"
 # "bosch_mqtt"
 #
 # Use simulation during development.
-CAMERA_TYPE = "simulation"
+CAMERA_TYPE = "bosch_mqtt" #later change to "bosch_mqtt" for production
 
 # Fallback ID if the MQTT payload does not contain
 # camera information.
