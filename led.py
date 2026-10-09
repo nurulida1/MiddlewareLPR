@@ -91,20 +91,25 @@ class LEDController:
 
         # EXAMPLE ONLY. Replace with the actual CUSTronics frame.
         # Do not assume plain text + CRLF is the controller's protocol.
-        payload = (message + "\r\n").encode("ascii", errors="replace")
+        payload = (message + "\r\n").encode("ascii", errors="strict")
+
+        # Show exactly what will be transmitted
+        self.logger.info("ASCII text to send: %r", message)
+        self.logger.info("ASCII bytes: %s", payload.hex(" ").upper())
+        self.logger.info("Byte count: %d", len(payload))
 
         for attempt in range(1, RS485_MAX_RETRIES + 1):
             try:
-                self.serial_connection.write(payload)
+                bytes_written = self.serial_connection.write(payload)
                 self.serial_connection.flush()
 
                 self.logger.info(
-                    "Wrote %d bytes to %s (attempt %d)",
+                    "Serial write completed: %d/%d bytes to %s",
+                    bytes_written,
                     len(payload),
                     SERIAL_PORT,
-                    attempt,
                 )
-                return True
+                return bytes_written == len(payload)
 
             except Exception:
                 self.logger.exception(
