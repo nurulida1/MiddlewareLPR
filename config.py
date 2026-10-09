@@ -34,7 +34,7 @@ CAMERA_ID = "CAM_ENTRY_01"
 
 MQTT_BROKER_HOST = os.getenv(
     "MQTT_BROKER_HOST",
-    "127.0.0.1",
+    "192.168.0.100",
 )
 
 MQTT_BROKER_PORT = int(
