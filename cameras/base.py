@@ -1,30 +1,15 @@
-from abc import (
-    ABC,
-    abstractmethod,
-)
+from abc import ABC, abstractmethod
 
 
-class BaseCameraListener(
-    ABC
-):
-
-    def __init__(
-        self,
-        callback,
-    ):
-
+class BaseCameraListener(ABC):
+    def __init__(self, callback):
         self.callback = callback
-
         self.running = False
 
     @abstractmethod
-    def start(
-        self,
-    ):
-        pass
+    def start(self):
+        """Start listening for camera events."""
+        raise NotImplementedError
 
-    def stop(
-        self,
-    ):
-
+    def stop(self):
         self.running = False

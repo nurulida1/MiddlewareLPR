@@ -1,1 +1,1 @@
-# Camera integration package
+# Camera listener package

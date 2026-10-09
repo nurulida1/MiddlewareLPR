@@ -1,261 +1,130 @@
 import json
 import logging
+import threading
 import uuid
 
-from datetime import (
-    datetime,
-    timezone,
-)
+from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
-from cameras.base import (
-    BaseCameraListener,
-)
-
-from models import (
-    PlateEvent,
-)
-
+from cameras.base import BaseCameraListener
 from config import (
     CAMERA_ID,
     MQTT_BROKER_HOST,
     MQTT_BROKER_PORT,
     MQTT_USERNAME,
     MQTT_PASSWORD,
+    MQTT_CLIENT_ID,
     MQTT_TOPIC,
     MQTT_QOS,
     MQTT_KEEPALIVE,
-    MQTT_CLIENT_ID,
     MQTT_RECONNECT_MIN_DELAY,
     MQTT_RECONNECT_MAX_DELAY,
     MQTT_USE_TLS,
-    MQTT_CA_CERT,
-    MQTT_CLIENT_CERT,
-    MQTT_CLIENT_KEY,
 )
+from models import PlateEvent
 
 
-logger = logging.getLogger(
-    "middleware"
-)
+class BoschMQTTListener(BaseCameraListener):
+    def __init__(self, callback):
+        super().__init__(callback)
 
+        self.logger = logging.getLogger(__name__)
+        self.client = None
+        self.connected = threading.Event()
 
-class BoschMQTTListener(
-    BaseCameraListener
-):
-
-    def __init__(
-        self,
-        callback,
-    ):
-
-        super().__init__(
-            callback
-        )
-
-        # Paho MQTT 2.x callback API.
+    def start(self):
+        self.running = True
 
         self.client = mqtt.Client(
-            callback_api_version=(
-                mqtt.CallbackAPIVersion.VERSION2
-            ),
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=MQTT_CLIENT_ID,
             protocol=mqtt.MQTTv311,
         )
 
-        # ====================================================
-        # AUTHENTICATION
-        # ====================================================
-
         if MQTT_USERNAME:
-
             self.client.username_pw_set(
-                username=MQTT_USERNAME,
-                password=MQTT_PASSWORD,
+                MQTT_USERNAME,
+                MQTT_PASSWORD or None,
             )
-
-        # ====================================================
-        # TLS
-        # ====================================================
 
         if MQTT_USE_TLS:
-
-            self.client.tls_set(
-                ca_certs=MQTT_CA_CERT,
-                certfile=MQTT_CLIENT_CERT,
-                keyfile=MQTT_CLIENT_KEY,
-            )
-
-        # ====================================================
-        # RECONNECT
-        # ====================================================
+            self.client.tls_set()
 
         self.client.reconnect_delay_set(
-            min_delay=(
-                MQTT_RECONNECT_MIN_DELAY
-            ),
-            max_delay=(
-                MQTT_RECONNECT_MAX_DELAY
-            ),
+            min_delay=MQTT_RECONNECT_MIN_DELAY,
+            max_delay=MQTT_RECONNECT_MAX_DELAY,
         )
 
-        # ====================================================
-        # CALLBACKS
-        # ====================================================
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
 
-        self.client.on_connect = (
-            self._on_connect
-        )
-
-        self.client.on_disconnect = (
-            self._on_disconnect
-        )
-
-        self.client.on_message = (
-            self._on_message
-        )
-
-    # ========================================================
-    # START
-    # ========================================================
-
-    def start(
-        self,
-    ):
-
-        self.running = True
-
-        logger.info(
-            "Connecting to MQTT broker | "
-            "host=%s | "
-            "port=%s | "
-            "topic=%s",
+        self.logger.info(
+            "Connecting to MQTT broker %s:%s",
             MQTT_BROKER_HOST,
             MQTT_BROKER_PORT,
-            MQTT_TOPIC,
         )
+        self.logger.info("MQTT subscription topic: %s", MQTT_TOPIC)
 
         try:
-
             self.client.connect(
-                host=MQTT_BROKER_HOST,
-                port=MQTT_BROKER_PORT,
-                keepalive=MQTT_KEEPALIVE,
+                MQTT_BROKER_HOST,
+                MQTT_BROKER_PORT,
+                MQTT_KEEPALIVE,
             )
-
-            logger.info(
-                "MQTT network loop starting"
-            )
-
-            self.client.loop_forever(
-                retry_first_connection=True
-            )
-
+            self.client.loop_forever(retry_first_connection=True)
+        except KeyboardInterrupt:
+            self.logger.info("MQTT listener interrupted.")
         except Exception:
-
-            if self.running:
-
-                logger.exception(
-                    "MQTT listener failed"
-                )
-
-                raise
-
+            self.logger.exception("MQTT listener failed.")
+            raise
         finally:
+            self.stop()
 
-            self.running = False
-
-    # ========================================================
-    # STOP
-    # ========================================================
-
-    def stop(
-        self,
-    ):
-
+    def stop(self):
         self.running = False
 
-        try:
+        if self.client is not None:
+            try:
+                self.client.disconnect()
+                self.client.loop_stop()
+            except Exception:
+                self.logger.exception("Error stopping MQTT client.")
 
-            self.client.disconnect()
+        super().stop()
 
-        except Exception:
-
-            logger.exception(
-                "Error disconnecting "
-                "MQTT client"
-            )
-
-        logger.info(
-            "Bosch MQTT listener stopped"
-        )
-
-    # ========================================================
-    # CONNECTED
-    # ========================================================
-
-    def _on_connect(
-        self,
-        client,
-        userdata,
-        flags,
-        reason_code,
-        properties,
-    ):
-
-        if reason_code != 0:
-
-            logger.error(
-                "MQTT connection failed | "
-                "reason=%s",
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            self.logger.error(
+                "MQTT connection failed: %s",
                 reason_code,
             )
-
             return
 
-        logger.info(
-            "MQTT connected successfully | "
-            "broker=%s:%s",
+        self.connected.set()
+        self.logger.info(
+            "MQTT connected successfully: %s:%s",
             MQTT_BROKER_HOST,
             MQTT_BROKER_PORT,
         )
 
-        result, message_id = (
-            client.subscribe(
-                MQTT_TOPIC,
-                qos=MQTT_QOS,
-            )
+        result, message_id = client.subscribe(
+            MQTT_TOPIC,
+            qos=MQTT_QOS,
         )
 
-        if (
-            result
-            != mqtt.MQTT_ERR_SUCCESS
-        ):
-
-            logger.error(
-                "MQTT subscribe failed | "
-                "topic=%s | "
-                "result=%s",
+        if result == mqtt.MQTT_ERR_SUCCESS:
+            self.logger.info(
+                "Subscribed to %s (message id %s)",
                 MQTT_TOPIC,
+                message_id,
+            )
+        else:
+            self.logger.error(
+                "MQTT subscription request failed: %s",
                 result,
             )
-
-            return
-
-        logger.info(
-            "MQTT subscribed | "
-            "topic=%s | "
-            "qos=%s | "
-            "mid=%s",
-            MQTT_TOPIC,
-            MQTT_QOS,
-            message_id,
-        )
-
-    # ========================================================
-    # DISCONNECTED
-    # ========================================================
 
     def _on_disconnect(
         self,
@@ -265,163 +134,102 @@ class BoschMQTTListener(
         reason_code,
         properties,
     ):
+        self.connected.clear()
+        self.logger.warning(
+            "MQTT disconnected: %s",
+            reason_code,
+        )
 
-        if self.running:
-
-            logger.warning(
-                "MQTT disconnected unexpectedly | "
-                "reason=%s",
-                reason_code,
-            )
-
-        else:
-
-            logger.info(
-                "MQTT disconnected"
-            )
-
-    # ========================================================
-    # MQTT MESSAGE
-    # ========================================================
-
-    def _on_message(
-        self,
-        client,
-        userdata,
-        message,
-    ):
-
+    def _on_message(self, client, userdata, message):
         try:
-
-            raw_payload = (
-                message.payload.decode(
-                    "utf-8"
-                )
+            raw_payload = message.payload.decode("utf-8")
+            self.logger.debug(
+                "MQTT message received | topic=%s | payload=%s",
+                message.topic,
+                raw_payload,
             )
+
+            payload = json.loads(raw_payload)
+
+            if not isinstance(payload, dict):
+                self.logger.warning("Ignoring non-object JSON payload.")
+                return
+
+            event = self._parse_payload(payload)
+
+            if event is None:
+                self.logger.warning(
+                    "Message received but no valid plate was found. "
+                    "Check the raw payload above."
+                )
+                return
+
+            self.logger.info(
+                "Plate detected | plate=%s | camera=%s | topic=%s",
+                event.plate,
+                event.camera_id,
+                message.topic,
+            )
+
+            self.callback(event)
 
         except UnicodeDecodeError:
-
-            logger.warning(
-                "MQTT payload is not UTF-8 | "
-                "topic=%s",
-                message.topic,
-            )
-
-            return
-
-        logger.info(
-            "Bosch MQTT message received | "
-            "topic=%s | "
-            "qos=%s | "
-            "retain=%s",
-            message.topic,
-            message.qos,
-            message.retain,
-        )
-
-        # ----------------------------------------------------
-        # JSON
-        # ----------------------------------------------------
-
-        try:
-
-            payload = json.loads(
-                raw_payload
-            )
-
+            self.logger.exception("MQTT payload is not valid UTF-8.")
         except json.JSONDecodeError:
+            self.logger.exception("MQTT payload is not valid JSON.")
+        except Exception:
+            self.logger.exception("Failed to process MQTT message.")
 
-            logger.warning(
-                "MQTT payload is not valid JSON | "
-                "topic=%s | "
-                "payload=%s",
-                message.topic,
-                raw_payload[:500],
-            )
-
-            return
-
-        logger.debug(
-            "Bosch MQTT payload | "
-            "topic=%s | "
-            "payload=%s",
-            message.topic,
-            payload,
-        )
-
-        # ----------------------------------------------------
-        # EXTRACT LPR DATA
-        # ----------------------------------------------------
-
-        event = self._parse_payload(
-            payload
-        )
-
-        if event is None:
-
-            logger.warning(
-                "Unable to extract plate from "
-                "Bosch MQTT message | "
-                "topic=%s",
-                message.topic,
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # PASS TO APPLICATION
-        # ----------------------------------------------------
+    def _parse_payload(self, payload):
+        # First try the known nested Bosch IVA Pro LPR structure.
+        plate = None
 
         try:
+            plate = (
+                payload["Data"]
+                ["LicensePlateInfo"]
+                ["LicensePlateInfo"]
+                ["PlateNumber"]
+                ["#text"]
+            )
+        except (KeyError, TypeError):
+            pass
 
-            self.callback(
-                event
+        # Fallback for alternative JSON structures.
+        if plate is None:
+            plate = self._find_value(
+                payload,
+                {
+                    "platenumber",
+                    "plate_number",
+                    "licenseplatenumber",
+                    "licensenumber",
+                    "license_number",
+                    "registrationnumber",
+                },
             )
 
-        except Exception:
+        if not isinstance(plate, (str, int)):
+            return None
 
-            logger.exception(
-                "Error processing Bosch "
-                "MQTT event"
-            )
+        plate = str(plate).strip()
 
-    # ========================================================
-    # PARSE BOSCH PAYLOAD
-    # ========================================================
+        if not plate:
+            return None
 
-    def _parse_payload(
-        self,
-        payload,
-    ):
-
-        # No event filtering here.
-        #
-        # Bosch Configuration Manager Publish Filter
-        # already controls which LPR events reach MQTT.
-        #
-        # We only extract the required data.
-        #
-        # Exact Bosch JSON field names should be replaced
-        # once one real MQTT payload is captured.
-
-        plate = self._find_value(
+        timestamp_value = self._find_value(
             payload,
             {
-                "platenumber",
-                "plate_number",
-                "plate",
-                "licenseplate",
-                "license_plate",
-                "licensenumber",
-                "license_number",
+                "utctime",
+                "timestamp",
+                "eventtime",
+                "event_time",
+                "datetime",
+                "date_time",
             },
         )
 
-        if plate is None:
-
-            return None
-
-        camera_id = self._find_value(
+        camera_value = self._find_value(
             payload,
             {
                 "cameraid",
@@ -433,198 +241,94 @@ class BoschMQTTListener(
             },
         )
 
-        event_id = self._find_value(
+        event_id_value = self._find_value(
             payload,
-            {
-                "eventid",
-                "event_id",
-            },
-        )
-
-        timestamp_value = (
-            self._find_value(
-                payload,
-                {
-                    "timestamp",
-                    "eventtime",
-                    "event_time",
-                    "datetime",
-                    "date_time",
-                },
-            )
-        )
-
-        if camera_id is None:
-
-            camera_id = CAMERA_ID
-
-        if event_id is None:
-
-            event_id = str(
-                uuid.uuid4()
-            )
-
-        timestamp = (
-            self._parse_timestamp(
-                timestamp_value
-            )
+            {"eventid", "event_id"},
         )
 
         return PlateEvent(
-            plate=str(plate),
-            camera_id=str(camera_id),
-            event_id=str(event_id),
-            timestamp=timestamp,
+            plate=plate,
+            camera_id=str(camera_value or CAMERA_ID),
+            event_id=str(event_id_value or uuid.uuid4()),
+            timestamp=self._parse_timestamp(timestamp_value),
             source="bosch_mqtt",
         )
 
-    # ========================================================
-    # FIND VALUE
-    # ========================================================
+    @classmethod
+    def _find_value(cls, obj, target_keys):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                normalized_key = cls._normalize_key(key)
 
-    def _find_value(
-        self,
-        data,
-        possible_keys,
-    ):
+                if normalized_key in target_keys:
+                    unwrapped = cls._unwrap_value(value)
 
-        if isinstance(
-            data,
-            dict,
-        ):
+                    if unwrapped is not None:
+                        return unwrapped
 
-            # Search current object.
-
-            for key, value in (
-                data.items()
-            ):
-
-                normalized_key = (
-                    str(key)
-                    .strip()
-                    .lower()
-                )
-
-                if (
-                    normalized_key
-                    in possible_keys
-                    and value is not None
-                ):
-
-                    return value
-
-            # Search nested objects.
-
-            for value in (
-                data.values()
-            ):
-
-                result = (
-                    self._find_value(
-                        value,
-                        possible_keys,
-                    )
-                )
+            for value in obj.values():
+                result = cls._find_value(value, target_keys)
 
                 if result is not None:
-
                     return result
 
-        elif isinstance(
-            data,
-            list,
-        ):
-
-            for item in data:
-
-                result = (
-                    self._find_value(
-                        item,
-                        possible_keys,
-                    )
-                )
+        elif isinstance(obj, list):
+            for value in obj:
+                result = cls._find_value(value, target_keys)
 
                 if result is not None:
-
                     return result
 
         return None
 
-    # ========================================================
-    # TIMESTAMP
-    # ========================================================
-
-    def _parse_timestamp(
-        self,
-        value,
-    ):
-
-        if value is None:
-
-            return datetime.now(
-                timezone.utc
-            )
-
-        # ISO 8601
-
-        if isinstance(
-            value,
-            str,
-        ):
-
-            try:
-
-                normalized = (
-                    value.strip()
-                )
-
-                if normalized.endswith(
-                    "Z"
-                ):
-
-                    normalized = (
-                        normalized[:-1]
-                        + "+00:00"
-                    )
-
-                return (
-                    datetime.fromisoformat(
-                        normalized
-                    )
-                )
-
-            except ValueError:
-
-                logger.warning(
-                    "Unable to parse Bosch "
-                    "timestamp | value=%s",
-                    value,
-                )
-
-        # Unix timestamp
-
-        if isinstance(
-            value,
-            (int, float),
-        ):
-
-            try:
-
-                return (
-                    datetime.fromtimestamp(
-                        value,
-                        tz=timezone.utc,
-                    )
-                )
-
-            except (
-                ValueError,
-                OSError,
-                OverflowError,
-            ):
-
-                pass
-
-        return datetime.now(
-            timezone.utc
+    @staticmethod
+    def _normalize_key(key):
+        return "".join(
+            character.lower()
+            for character in str(key)
+            if character.isalnum()
         )
+
+    @staticmethod
+    def _unwrap_value(value):
+        if isinstance(value, dict):
+            for key in ("#text", "value", "text"):
+                if key in value:
+                    return value[key]
+
+            return None
+
+        return value
+
+    @staticmethod
+    def _parse_timestamp(value):
+        if value is None:
+            return datetime.now(timezone.utc)
+
+        try:
+            if isinstance(value, (int, float)):
+                # Accept Unix seconds or milliseconds.
+                timestamp = float(value)
+
+                if timestamp > 100_000_000_000:
+                    timestamp /= 1000
+
+                return datetime.fromtimestamp(
+                    timestamp,
+                    tz=timezone.utc,
+                )
+
+            text_value = str(value).strip()
+
+            if text_value.endswith("Z"):
+                text_value = text_value[:-1] + "+00:00"
+
+            parsed = datetime.fromisoformat(text_value)
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+
+            return parsed.astimezone(timezone.utc)
+
+        except (ValueError, TypeError, OverflowError):
+            return datetime.now(timezone.utc)
