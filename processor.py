@@ -1,3 +1,4 @@
+
 import logging
 import re
 import time
@@ -17,7 +18,6 @@ class PlateProcessor:
         if not isinstance(plate, str):
             return ""
 
-        # Uppercase and remove spaces and other separators.
         return re.sub(r"[^A-Z0-9]", "", plate.upper())
 
     def process(self, event):
@@ -31,7 +31,6 @@ class PlateProcessor:
         cache_key = (event.camera_id, plate)
 
         with self._lock:
-            # Remove expired entries.
             expired_keys = [
                 key
                 for key, last_time in self._last_seen.items()
@@ -42,8 +41,6 @@ class PlateProcessor:
                 del self._last_seen[key]
 
             last_time = self._last_seen.get(cache_key)
-
-            # Refresh last-seen time even for a duplicate.
             self._last_seen[cache_key] = now
 
             if (
@@ -51,8 +48,7 @@ class PlateProcessor:
                 and now - last_time < DUPLICATE_TIMEOUT
             ):
                 self.logger.info(
-                    "Duplicate plate ignored: %s",
-                    plate,
+                    "Duplicate plate ignored: %s", plate
                 )
                 return None
 
