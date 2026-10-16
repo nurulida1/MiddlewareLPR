@@ -18,7 +18,7 @@ class PlateProcessor:
         if not isinstance(plate, str):
             return ""
 
-        return re.sub(r"[^A-Z0-9]", "", plate.upper())
+        return re.sub(r"[^A-Z0-9 ]", "", plate.upper()).strip()
 
     def process(self, event):
         plate = self.clean_plate(event.plate)

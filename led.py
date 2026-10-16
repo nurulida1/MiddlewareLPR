@@ -538,16 +538,13 @@ class LEDController:
 
     def _animate_scroll(self):
         """
-        Show long messages from right to left in a fixed-width window.
-        Leave a short blank pause before restarting the message.
-        Short, non-scrolling messages remain centered.
+        Scroll long messages left and pause for one frame before restarting.
         """
 
         if not self.root or not self.gui_running:
             return
 
         changed = False
-        blank_pause_frames = 1
 
         for row_index, state in self._scroll_states.items():
             if state is None:
@@ -558,18 +555,11 @@ class LEDController:
 
             self.colours[row_index] = state["colour"]
 
+            # Once the whole message and trailing spaces have scrolled away,
+            # show one blank frame, then restart.
             if position > len(message):
                 self.rows[row_index] = " " * COLUMNS
-
-                pause_remaining = state.get("pause_remaining", 0)
-
-                if pause_remaining >= blank_pause_frames:
-                    # Restart from the beginning after the blank pause.
-                    state["position"] = 0
-                    state["pause_remaining"] = 0
-                else:
-                    state["pause_remaining"] = pause_remaining + 1
-
+                state["position"] = 0
                 changed = True
                 continue
 
@@ -617,7 +607,7 @@ class LEDController:
             self.logger.warning("Empty display message ignored.")
             return None
 
-        message = str(text).strip().upper()
+        message = str(text).strip().strip()
 
         if not message:
             self.logger.warning("Empty display message ignored.")
@@ -706,12 +696,13 @@ class LEDController:
             self.gui_queue.put(("row", (row_index, message, colour)))
 
         self.logger.info(
-            "[LED VIRTUAL] Port=%s | Row %d | colour=%s | "
-            "ASCII=%s | HEX=%s",
+            "[LED SIMULATION] Port=%s | Row %d | Colour=%s | "
+            "Text=%r | Length=%d | ASCII_HEX=%s",
             self.port,
             row,
             colour,
             message,
+            len(message),
             message.encode("ascii").hex(" ").upper(),
         )
 
@@ -738,12 +729,15 @@ class LEDController:
                     self.gui_queue.put(("row", (1, second_message, second_colour)))
 
                 self.logger.info(
-                    "[LED VIRTUAL] Port=%s | Row 2 | colour=GREEN | "
-                    "ASCII=%s | HEX=%s",
+                    "[LED SIMULATION] Port=%s | Row 2 | Colour=%s | "
+                    "Text=%r | Length=%d | ASCII_HEX=%s",
                     self.port,
+                    second_colour,
                     second_message,
+                    len(second_message),
                     second_message.encode("ascii").hex(" ").upper(),
                 )
+
             else:
                 self.gui_queue.put(("clear", 1))
                 self.logger.info(

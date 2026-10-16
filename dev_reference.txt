@@ -1,444 +1,544 @@
-Bosch LPR to CUSTronics LED Middleware
-Developer and Maintenance Reference
+# Bosch LPR to CUSTronics LED Middleware
+## Developer Setup, Installation & Maintenance Guide
 
-Purpose: This document helps developers identify which file to
-inspect or change when updating the Bosch license-plate recognition
-(LPR) integration, IN/OUT routing, LED messages, serial-port settings,
-logging, or barrier integration.
+## 1. Project overview
 
-Project folder (Windows):
-HikvisionLprLedMiddleware
+This project connects a Bosch camera with IVA Pro License Plate Recognition to a CUSTronics LED display through MQTT and a Python middleware application.
 
-Important status note: MQTT plate reception and parsing have been
-tested. The LED currently has a virtual/simulation display path.
-Physical CUSTronics RS485 output must not be considered working until
-the vendor's command protocol is confirmed and implemented. Barrier
-control is also not verified with physical hardware.
+The middleware receives plate metadata, processes the plate number, identifies the IN/OUT direction, and routes the event to the corresponding LED controller.
 
-------------------------------------------------------------------------
-1. System overview
+### System architecture
 
- text
-Bosch camera with IVA Pro License Plate
-             |
-             | MQTT event / metadata JSON
-             v
-        MQTT broker
-      192.168.0.100:1883
-             |
-             | parking/bosch/IN or parking/bosch/OUT
-             v
- cameras/bosch_mqtt.py
-   subscribe + parse plate
-             |
-             | normalized camera event
-             v
-       Plate processor
- duplicate checks / direction / validation
-             |
-             v
-         event_queue.py
- route event to IN or OUT LED
-             |
-       +-----+------+
-       |            |
-       v            v
- IN LED controller  OUT LED controller
- COM60 (configured) COM61 (configured)
-       |            |
-       v            v
- virtual LED window / future RS485 hardware
+```text
+Bosch LPR Camera
+       |
+       | MQTT metadata / JSON
+       v
+MQTT Broker (Mosquitto)
+192.168.0.100:1883
+       |
+       | parking/bosch/IN
+       | parking/bosch/OUT
+       v
+Python Middleware
+       |
+       +--> Parse plate number
+       +--> Validate / detect duplicates
+       +--> Identify IN or OUT
+       |
+       v
+Event Queue
+       |
+       +------------------+
+       |                  |
+       v                  v
+    IN LED              OUT LED
+    Controller          Controller
+       |                  |
+       v                  v
+ Virtual display / future physical RS485 output
+```
 
+### Current implementation status
 
-The barrier integration is a separate optional path. Do not assume that
-receiving a plate automatically authorizes a vehicle or opens the
-barrier; the authorization decision must be explicitly verified and
-mapped.
-2. Which file should I change?
+- MQTT reception and plate parsing have been tested with simulated messages.
+- The virtual LED display is available for software testing.
+- Physical CUSTronics RS485 output is not verified. The vendor's command protocol must be obtained and implemented first.
+- Physical barrier relay operation is not verified. Authorization rules, wiring, and safety behaviour must be confirmed before hardware testing.
 
-  ---------------------------------------------------------------------------------
-  Change needed           Start here                      Also check
-  ----------------------- ------------------------------- -------------------------
-  Broker IP, port, topic  config.py                     cameras/bosch_mqtt.py
-  names, camera/site/lane                                 
-  IDs                                                     
+---
 
-  Switch between Bosch    config.py                     cameras/init.py or
-  MQTT and simulation                                     the camera factory module
-  camera                                                  
+## 2. Prerequisites
 
-  Extract plate number    cameras/bosch_mqtt.py         MQTT test payload and
-  from Bosch JSON                                         logs
+Before setting up the project, install or prepare the following:
 
-  Decide whether an event Topic/direction mapping in      event_queue.py
-  is IN or OUT            cameras/bosch_mqtt.py and/or  
-                          processor.py                  
+| Requirement | Purpose |
+|---|---|
+| Git | Clone and update the source code |
+| Python | Run the middleware |
+| Visual Studio Code or another editor | Inspect and edit the code |
+| Mosquitto MQTT broker | Receive and publish MQTT messages |
+| Bosch camera access | Configure and test real camera metadata |
+| Windows PowerShell | Run setup commands and diagnose ports |
+| CUSTronics hardware documentation | Required before implementing physical RS485 output |
 
-  Change IN/OUT plate     event_queue.py                led.py
-  display and welcome                                     
-  text                                                    
+Python, Git, and Mosquitto versions should be checked against the current project requirements and existing development environment.
 
-  Change row, colour,     led.py                        event_queue.py
-  text alignment,                                         
-  scrolling, timeout,                                     
-  virtual window                                          
+---
 
-  Change IN/OUT COM port  config.py                     main.py, led.py
-  or baud rate                                            
+## 3. Clone the GitHub repository
 
-  Fix Windows COM-port    main.py or the serial/LED     Windows Device Manager /
-  discovery               initialization module           GetPortNames()
+Open PowerShell or the VS Code terminal.
 
-  Change duplicate        processor.py                  event_queue.py,
-  detection, plate                                        config.py
-  validation,                                             
-  authorization mapping                                   
+Navigate to the folder where you keep your projects. For example:
 
-  Change queue processing event_queue.py                main.py,
-  and event routing                                       processor.py, led.py
+```powershell
+cd C:\Users\$env:USERNAME\Project
+```
 
-  Change log format, log  logger_config.py (if used by  main.py, config.py
-  level, rotating log     this project)                   
-  file                                                    
+Clone the repository:
 
-  Change barrier          barrier/relay_controller.py   config.py,
-  simulation/relay                                        event_queue.py
-  behaviour                                               
+```powershell
+git clone https://github.com/nurulida1/HikvisionLprLedMiddleware.git
+```
 
-  Change startup,         main.py                       modules imported by it
-  shutdown, object wiring                                 
+**Important:** Confirm the actual GitHub repository URL with the project owner. If the repository URL or name differs, replace the example above with the correct URL.
 
-  Change camera listener  camera factory module (often    config.py,
-  selection               cameras/init.py or        cameras/bosch_mqtt.py
-                          similar)                        
-  ---------------------------------------------------------------------------------
+Enter the project folder:
 
-Rule of thumb: configuration belongs in config.py; camera-specific
-MQTT parsing belongs in cameras/bosch_mqtt.py; message presentation
-belongs in led.py; event routing belongs in event_queue.py; startup
-and component wiring belong in main.py.
+```powershell
+cd HikvisionLprLedMiddleware
+```
 
-Check the actual imports and class/function names in the current branch
-before editing. File names can differ between branches.
+Check the current branch and working tree:
 
-------------------------------------------------------------------------
-3. Important configuration
+```powershell
+git branch --show-current
+git status
+```
 
-The project has been configured around the following values; verify
-config.py before using them in another environment.
+If the project already exists locally, update it instead of cloning a second copy:
 
-  -----------------------------------------------------------------------
-  Setting                 Current/reference value What it controls
-  ----------------------- ----------------------- -----------------------
-  MQTT broker host        192.168.0.100         PC running Mosquitto
+```powershell
+git pull
+```
 
-  MQTT port               1883                  Plain MQTT, not MQTT
-                                                  over TLS
+Before pulling or switching branches, commit or back up any local changes that need to be preserved.
 
-  Topic prefix            parking/bosch         Topic namespace
+---
 
-  IN topic                parking/bosch/IN      Entry lane
-                                                  test/production topic
+## 4. Open the project
 
-  OUT topic               parking/bosch/OUT     Exit lane
-                                                  test/production topic
+Open the project folder in VS Code:
 
-  Camera type             bosch_mqtt            Selects Bosch MQTT
-                                                  listener
+```powershell
+code .
+```
 
-  Camera ID               CAM_ENTRY_01          Event source identifier
+If the `code` command is unavailable, open VS Code manually and select **File → Open Folder**.
 
-  Site ID                 PARKING_01            Site identifier
+Review the project structure. Expected modules discussed in this project include:
 
-  Lane ID                 ENTRY_01              Lane identifier; use
-                                                  lane-specific values if
-                                                  IN/OUT are separate
+```text
+HikvisionLprLedMiddleware/
+├── main.py
+├── config.py
+├── processor.py
+├── event_queue.py
+├── led.py
+├── cameras/
+│   └── bosch_mqtt.py
+├── barrier/
+│   └── relay_controller.py
+├── requirements.txt
+└── ...
+```
 
-  IN LED port             COM60                 Configured entry
-                                                  display port
+This is a reference structure, not a guaranteed complete file listing. Confirm which files actually exist in the cloned branch before following file-specific instructions.
 
-  OUT LED port            COM61                 Configured exit display
-                                                  port
+---
 
-  Serial settings         9600, 8 data bits, no Must match hardware
-                          parity, 1 stop bit      documentation
-                          (8N1)                   
+## 5. Set up the Python environment
 
-  Barrier control         Disabled/simulation     Avoids unintended
-                          until verified          physical operation
-  -----------------------------------------------------------------------
+### Step 1: Check Python
 
-COM port numbers are not reserved by the application. Windows may assign
-different numbers after reconnecting USB adapters. Confirm the current
-ports before a test.
-Where to change settings
+```powershell
+python --version
+```
 
-1.  Open config.py.
-2.  Find the relevant constant (for example, LED_IN_SERIAL_PORT,
-    LED_OUT_SERIAL_PORT, broker host or topic).
-3.  Change only the setting required.
-4.  Restart main.py so the application reloads configuration.
-5.  Read the startup log to confirm which values and ports were actually
-    loaded.
+If that command is unavailable, try:
 
-Do not place credentials or passwords in source control.
+```powershell
+py --version
+```
 
-------------------------------------------------------------------------
-4. MQTT payload and plate extraction
+Use a Python version supported by the project's dependencies.
 
-A test payload that matches the currently discussed Bosch JSON structure
-is:
+### Step 2: Create a virtual environment
 
- json
-{
-  "Data": {
-    "LicensePlateInfo": {
-      "LicensePlateInfo": {
-        "PlateNumber": {
-          "#text": "PUTRAJAYA1234"
-        }
-      }
-    }
-  }
-}
+From the project root:
 
+```powershell
+python -m venv .venv
+```
 
-The plate string is at:
+### Step 3: Activate the environment
 
-Data.LicensePlateInfo.LicensePlateInfo.PlateNumber.#text
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
-The MQTT listener should: 1. Receive a message on a subscribed topic. 2.
-Decode the payload as JSON. 3. Safely locate the plate number. 4. Reject
-or log messages with no usable plate. 5. Pass a normalized event to the
-processing/routing layer.
+If PowerShell blocks activation, use an approved environment-specific workaround or activate the environment from the VS Code terminal. Avoid changing machine-wide execution policy unnecessarily.
 
-Bosch metadata can vary by event type and firmware/configuration. If a
-real camera event does not parse, capture the actual topic and payload
-first; then update the parser in cameras/bosch_mqtt.py. Do not assume
-every MQTT event contains a plate.
+Confirm that the environment is active:
 
-------------------------------------------------------------------------
-5. IN and OUT LED behaviour
-Intended virtual display behaviour
+```powershell
+python --version
+python -m pip --version
+```
 
-  Direction               Port                    Row 1        Row 2
-  ----------------------- ----------------------- ------------ --------------------
-  IN                      COM60 (configured)    Plate, RED   WELCOME, GREEN
-  OUT                     COM61 (configured)    Plate, RED   THANK YOU, GREEN
-  After display timeout   corresponding display   Clear        Clear
+### Step 4: Install dependencies
 
-PUTRAJAYA1234 contains 13 characters, while each LED row supports 8
-characters. It therefore needs scrolling or another agreed overflow
-behaviour. THANK YOU is 9 characters and also exceeds 8 characters;
-WELCOME is 7 characters and can fit on one row.
-Where to change the messages
-- event_queue.py: chooses the message and colour for IN versus OUT.
-- led.py: handles row placement, virtual display updates, scrolling
-    and clearing.
+If `requirements.txt` exists:
 
-When changing the IN/OUT messages, verify that the event queue passes
-the right values and that the LED controller accepts the same parameter
-names. If a queue tuple format is changed, update both the producer and
-the consumer.
-Queue tuple warning
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-The virtual LED queue consumer has used separate message types such as
-row and scroll, with payloads shaped like:
+If the repository uses another dependency manager or lockfile, follow that project's instructions instead.
 
- python
-("row", (row_index, message, colour))
-("scroll", (row_index, message, colour))
+Do not install arbitrary packages just because they are mentioned in this guide. Check the dependency file first.
 
+### Step 5: Select the interpreter in VS Code
 
-Internal row indices are zero-based (0 for the first row and 1 for
-the second), while the public display() call may use human-friendly
-row numbers (1 and 2). Keep this conversion consistent. A mismatch
-between the queued tuple shape and the consumer's unpacking logic can
-cause a virtual display update to fail.
-Physical LED limitation
+1. Press `Ctrl+Shift+P`.
+2. Search for **Python: Select Interpreter**.
+3. Select the interpreter inside the project's `.venv` folder.
 
-The panel specification alone is not enough to construct valid RS485
-commands. Before enabling real serial writes, obtain the CUSTronics
-protocol from the vendor, including command framing, addressing,
-row/colour commands, text encoding, terminators/checksum if applicable,
-and acknowledgement/error behaviour. Until then, logs or the virtual
-window prove only the software path---not that the physical panel will
-display the text.
+---
 
-------------------------------------------------------------------------
-6. COM port troubleshooting
+## 6. Install and verify Mosquitto
 
-Run this in PowerShell to list ports Windows currently detects:
+Mosquitto is the MQTT broker used in the reference configuration.
 
- powershell
+If Mosquitto is already installed on the machine, verify the installation rather than installing it again.
+
+The reference executable path is:
+
+```text
+C:\Program Files\Mosquitto\
+```
+
+Check whether the executable exists:
+
+```powershell
+Test-Path "C:\Program Files\Mosquitto\mosquitto_pub.exe"
+Test-Path "C:\Program Files\Mosquitto\mosquitto_sub.exe"
+```
+
+Check whether port 1883 is listening:
+
+```powershell
+Get-NetTCPConnection -LocalPort 1883 -State Listen
+```
+
+If no listener appears, check whether the Mosquitto service is running and whether its configuration is correct.
+
+### Network configuration
+
+The reference broker address is:
+
+```text
+192.168.0.100:1883
+```
+
+The broker must be reachable from the middleware PC and the Bosch camera.
+
+If the camera and broker are on separate devices, verify that:
+
+- Both devices have compatible IP addresses and subnet settings.
+- The broker listens on the required network interface.
+- Windows Firewall permits the required MQTT traffic.
+- The camera is configured with the correct broker IP, port, and topic names.
+
+Do not assume the reference IP address is correct for every development environment.
+
+---
+
+## 7. Configure the middleware
+
+Open `config.py` and review the MQTT, camera, LED, and barrier settings.
+
+Reference values:
+
+| Setting | Reference value |
+|---|---|
+| MQTT host | `192.168.0.100` |
+| MQTT port | `1883` |
+| IN topic | `parking/bosch/IN` |
+| OUT topic | `parking/bosch/OUT` |
+| Camera type | `bosch_mqtt` |
+| Camera ID | `CAM_ENTRY_01` |
+| Site ID | `PARKING_01` |
+| Lane ID | `ENTRY_01` |
+| IN LED port | `COM60` |
+| OUT LED port | `COM61` |
+| Serial configuration | `9600, 8N1` |
+| Barrier control | Disabled or simulation until verified |
+
+The actual configuration variable names may differ. Search for the relevant constants in the current source code rather than copying new names into the project blindly.
+
+### Important checks
+
+- Make sure the camera publishes to topics that the middleware actually subscribes to.
+- Make sure the broker address is reachable from the machine running `main.py`.
+- Confirm the correct IN and OUT LED ports.
+- Keep barrier control disabled until authorization, wiring, and safety behaviour have been reviewed.
+- Keep physical LED output disabled until the CUSTronics RS485 protocol is confirmed.
+
+---
+
+## 8. Run the middleware
+
+From the project root, with `.venv` activated:
+
+```powershell
+python main.py
+```
+
+Review the startup logs.
+
+Check for:
+
+- Successful application startup
+- Correct configuration values
+- MQTT broker connection
+- Successful subscription to the expected topics
+- IN/OUT controller initialization
+- Virtual LED simulator startup, if enabled
+- Warnings about unavailable COM ports
+- Barrier simulation or disabled status
+
+If startup fails, resolve the first error in the traceback before testing MQTT messages.
+
+Stop the application with `Ctrl+C` when required.
+
+---
+
+## 9. Test MQTT without the physical camera
+
+Use simulated MQTT messages to verify the software path before connecting real camera events.
+
+### Open a second PowerShell terminal
+
+Keep `main.py` running in the first terminal.
+
+### Test an IN event
+
+```powershell
+& "C:\Program Files\Mosquitto\mosquitto_pub.exe" `
+  -h 192.168.0.100 -p 1883 `
+  -t "parking/bosch/IN" `
+  -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
+```
+
+### Test an OUT event
+
+```powershell
+& "C:\Program Files\Mosquitto\mosquitto_pub.exe" `
+  -h 192.168.0.100 -p 1883 `
+  -t "parking/bosch/OUT" `
+  -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
+```
+
+Replace `192.168.0.100` with the actual broker address if needed.
+
+These commands simulate an MQTT event. They do not prove that the Bosch camera is publishing real license-plate metadata.
+
+### Expected software behaviour
+
+| Test | Expected result |
+|---|---|
+| Publish IN event | IN event is received and parsed |
+| IN event passes validation | Routed to the IN controller |
+| Publish OUT event | OUT event is received and parsed |
+| OUT event passes validation | Routed to the OUT controller |
+| Virtual LED enabled | Corresponding virtual display updates |
+| Invalid JSON | Error is logged without crashing the application |
+| Missing plate field | Event is rejected or ignored safely |
+
+If the event does not appear, check the broker address, topic, subscription, and application logs.
+
+---
+
+## 10. Test plate text and spaces
+
+Use this payload to test a plate-like string containing an internal space:
+
+```powershell
+& "C:\Program Files\Mosquitto\mosquitto_pub.exe" `
+  -h 192.168.0.100 -p 1883 `
+  -t "parking/bosch/IN" `
+  -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"QOE INTELLIGENCE"}}}}}'
+```
+
+Check the logs at each stage:
+
+1. MQTT payload extraction
+2. Processor normalization
+3. Event queue insertion
+4. LED display validation
+5. Virtual scrolling/display output
+
+If the space disappears, inspect `PlateProcessor.clean_plate()` in `processor.py`. A regular expression that allows only letters and digits will remove spaces.
+
+To preserve internal spaces for display testing:
+
+```python
+@staticmethod
+def clean_plate(plate):
+    if not isinstance(plate, str):
+        return ""
+
+    return re.sub(r"[^A-Z0-9 ]", "", plate.upper()).strip()
+```
+
+Confirm that `re` is imported in the module. Consider the project's real license-plate matching rules separately from arbitrary text display tests.
+
+---
+
+## 11. Connect and configure the Bosch camera
+
+Only proceed after the broker and middleware work with simulated MQTT events.
+
+1. Confirm the camera is powered on and reachable.
+2. Sign in to the Bosch camera web interface.
+3. Confirm that the IVA Pro License Plate feature is licensed and configured.
+4. Configure the camera's MQTT broker connection to point to the correct broker IP and port.
+5. Configure the MQTT topic prefix or event topics to match the middleware subscriptions.
+6. Enable the relevant LPR/metadata events for publication.
+7. Trigger a controlled plate-recognition test.
+8. Inspect the actual MQTT topic and JSON payload.
+9. Compare the real payload with the parser in `cameras/bosch_mqtt.py`.
+10. Update the parser only if the actual camera payload differs from the expected structure.
+
+The exact camera menu names depend on firmware and configuration. Do not assume that every Bosch camera exposes the same MQTT settings.
+
+A real camera event may contain metadata unrelated to license-plate recognition. Confirm that the payload actually contains a plate before changing the parser.
+
+---
+
+## 12. LED display and serial-port setup
+
+The reference configuration uses:
+
+- IN display: `COM60`
+- OUT display: `COM61`
+- Serial settings: `9600, 8N1`
+
+These are example configuration values. Check the actual hardware and Device Manager before using them.
+
+List currently detected serial ports:
+
+```powershell
 [System.IO.Ports.SerialPort]::GetPortNames()
+```
 
+If a port is missing, check the USB adapter, Device Manager, assigned COM number, and whether another application has opened the port.
 
-If only COM60 appears, the application cannot open a device on COM61
-at that time. Check: 1. Is the second USB-to-RS485 adapter physically
-connected? 2. Does it appear in Device Manager → Ports (COM & LPT)?
-3. Did Windows assign it a different COM number? 4. Does the startup log
-show the same port number as Device Manager? 5. Is another program
-holding the port open?
+### Virtual versus physical output
 
-Do not assume that two configured ports mean two physical adapters were
-detected. Virtual display windows and physical serial connections are
-separate concerns.
+**Virtual mode:** Used to test event routing, text, row layout, scrolling, and clearing.
 
-------------------------------------------------------------------------
-7. Safe test commands
+**Physical mode:** Requires a confirmed CUSTronics RS485 protocol, including command framing, addressing, row/colour commands, encoding, and any required checksum or acknowledgement.
 
-Run these from PowerShell. The Mosquitto executable path may differ on
-another PC.
-Publish an IN test event
+Do not enable physical serial writes merely because the virtual display works or a COM port is detected.
 
- powershell
-& "C:\Program Files\Mosquitto\mosquitto_pub.exe" -h 192.168.0.100 -p 1883 -t "parking/bosch/IN" -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
+---
 
-Publish an OUT test event
+## 13. Barrier integration
 
- powershell
-& "C:\Program Files\Mosquitto\mosquitto_pub.exe" -h 192.168.0.100 -p 1883 -t "parking/bosch/OUT" -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
+Barrier operation is a separate feature and should remain disabled or simulated until fully verified.
 
+Before physical testing, confirm:
 
-Use the same broker host that the PC can actually reach. These commands
-publish a test message; they do not prove that the camera itself has
-published a real LPR event.
-Suggested test checklist
-- [ ] Mosquitto is listening on the expected network interface and
-    port.
-- [ ] main.py starts without import/configuration errors.
-- [ ] Startup logs show the expected broker, topics and COM settings.
-- [ ] An IN message is received and parsed as PUTRAJAYA1234.
-- [ ] IN routes to the IN display and shows WELCOME.
-- [ ] An OUT message is received and parsed as PUTRAJAYA1234.
-- [ ] OUT routes to the OUT display and shows THANK YOU.
-- [ ] Long plate text scrolls or overflows according to the agreed
-    behaviour.
-- [ ] The display clears after its configured timeout.
-- [ ] Missing COM ports and malformed JSON are logged without crashing
-    the app.
-- [ ] Physical LED tests are performed only after the vendor protocol
-    is implemented and confirmed.
+- The authorization source and decision rules
+- Which plates are allowed to open the barrier
+- The relay interface and electrical requirements
+- The correct barrier input terminals
+- Pulse duration and trigger behaviour
+- Safety inputs and fail-safe behaviour
+- The physical wiring and installation procedure
 
-------------------------------------------------------------------------
-8. Barrier integration and authorization
+A recognized plate is not automatically authorized. A log reporting a simulated relay action does not prove the physical barrier has opened.
 
-The barrier integration is optional and must be treated separately from
-plate recognition.
-- A detected plate is not automatically an authorized plate.
-- The authorization result must come from a defined, tested rule or
-    external system.
-- Keep BARRIER_CONTROL_ENABLED disabled during development unless
-    the wiring, relay interface, authorization rule and fail-safe
-    behaviour have been reviewed.
-- barrier/relay_controller.py is the reference module for relay
-    control, if that is the module used in the current branch.
-- Test simulation first. Do not connect relay outputs to barrier
-    terminals based on software assumptions alone.
-- Confirm the MI-BGM-300 input terminal names, trigger type, pulse
-    duration, ground/reference requirements and safety inputs with the
-    barrier documentation or installer.
+---
 
-A software log saying "relay ON" in simulation is not proof that the
-physical barrier opened.
+## 14. Troubleshooting guide
 
-------------------------------------------------------------------------
-9. Logging and troubleshooting
+| Problem | What to check first |
+|---|---|
+| `python` command unavailable | Python installation and PATH |
+| Dependency import error | Virtual environment and dependency file |
+| `main.py` fails to start | First traceback error and configuration |
+| MQTT connection fails | Broker service, IP, port, firewall, network |
+| No events received | Topic names and subscriptions |
+| Event received without a plate | Actual JSON payload and parser |
+| IN/OUT direction is wrong | Topic mapping and event routing |
+| Plate spaces disappear | Plate normalization and downstream text handling |
+| Text is cut off | Eight-character row limit and scrolling |
+| Virtual LED does not update | Queue format, consumer, controller initialization |
+| COM port unavailable | Device Manager and current port assignments |
+| Physical LED does not display | RS485 protocol and hardware configuration |
+| Barrier does not open | Authorization mapping, relay mode, wiring, safety checks |
 
-Look at logs in this order:
+---
 
-1.  Startup: loaded configuration, broker connection, subscriptions,
-    detected COM ports and controller initialization.
-2.  Camera/MQTT: incoming topic and whether the payload contains a
-    plate.
-3.  Processor: normalized plate, direction,
-    duplicate/validation/authorization result.
-4.  Event queue: selected IN/OUT controller and message.
-5.  LED controller: row, colour, ASCII text/hex, scrolling and clear
-    operations.
-6.  Barrier controller: simulation/relay action and why a trigger
-    was accepted or rejected.
+## 15. Source-code maintenance reference
 
-If logs are unclear, improve the relevant module's log messages rather
-than adding all logging to one file. Keep sensitive information out of
-logs.
-Common symptoms
+| Responsibility | File to inspect |
+|---|---|
+| Configuration | `config.py` |
+| Application startup | `main.py` |
+| Bosch MQTT parsing | `cameras/bosch_mqtt.py` |
+| Camera selection | Actual camera factory/initialization module |
+| Plate validation and duplicate checks | `processor.py` |
+| Event routing and IN/OUT messages | `event_queue.py` |
+| Virtual LED, scrolling and clearing | `led.py` |
+| Logging configuration | `logger_config.py`, if present |
+| Barrier relay logic | `barrier/relay_controller.py`, if present |
 
-  -----------------------------------------------------------------------
-  Symptom                             First place to check
-  ----------------------------------- -----------------------------------
-  No MQTT events                      broker service, IP/port, firewall,
-                                      subscription topic,
-                                      cameras/bosch_mqtt.py
+Always inspect the current source code before assuming the file names, settings, function signatures, or behaviour described here are unchanged.
 
-  MQTT event appears but no plate     actual JSON payload and parser in
-                                      cameras/bosch_mqtt.py
+---
 
-  IN event displays THANK YOU       direction branch in
-                                      event_queue.py
+## 16. Git workflow for future changes
 
-  OUT display unavailable             Windows port list, configured OUT
-                                      COM port, controller initialization
+Before editing:
 
-  Virtual window logs invalid queue   queue producer in led.py and
-  tuple                               matching queue consumer
+```powershell
+git status
+git branch --show-current
+```
 
-  Plate is cut off                    8-character width, scrolling logic
-                                      in led.py
+After making and testing changes:
 
-  Display does not clear              timeout and clear handling in
-                                      led.py / event-processing code
+```powershell
+git diff
+```
 
-  Barrier does not trigger            authorization mapping, feature
-                                      flag, relay simulation/controller
-                                      and wiring validation
-  -----------------------------------------------------------------------
+Run the available project tests, then verify the simulated MQTT IN and OUT flows.
 
-------------------------------------------------------------------------
-10. Change-control checklist for coworkers
+Stage and commit only the intended changes:
 
-Before changing code:
+```powershell
+git add <changed-file>
+git commit -m "Describe the change"
+git push
+```
 
-1.  Pull the latest branch and check for uncommitted changes.
-2.  Identify the owning module from the table in Section 2.
-3.  Search for the relevant setting, function or log message before
-    editing.
-4.  Check both sides of any interface: producer/consumer, caller/callee,
-    or configuration/initialization.
-5.  Test with MQTT simulation before testing the real camera.
-6.  Test IN and OUT independently.
-7.  Confirm expected logs and virtual LED output.
-8.  Do not test a physical LED or barrier until its hardware protocol
-    and wiring are confirmed.
-9.  Record the change, test steps, result and any remaining limitation
-    in the project issue/commit.
-Before handing over
-- Document the actual file tree and entry point from the current
-    branch.
-- Record the exact broker address and topic names used at the site.
-- Record the current COM port assignments from Device Manager.
-- Obtain and version the CUSTronics RS485 protocol.
-- Document the source of the authorization decision and barrier safety
-    procedure.
-- Keep a known-good test payload and expected logs for regression
-    testing.
+Replace `<changed-file>` with the actual file path. Follow the team's branch and pull-request policy before pushing to a shared branch.
 
-------------------------------------------------------------------------
-11. Quick reference
-- Configuration: config.py
-- Application start-up / wiring: main.py
-- Bosch MQTT parsing: cameras/bosch_mqtt.py
-- Camera selection: camera factory module (check actual
-    filename/import)
-- Plate validation / duplicate handling: processor.py
-- IN/OUT routing and text choice: event_queue.py
-- Virtual LED, scrolling, rows and clearing: led.py
-- Log setup: logger_config.py if present in the current branch
-- Barrier relay integration: barrier/relay_controller.py if
-    present in the current branch
+Do not commit virtual-environment files, credentials, machine-specific settings, logs containing sensitive data, or unrelated local changes.
 
-Final reminder: This is a developer reference based on the project
-behaviour discussed so far, not a verified audit of every file in the
-latest repository. Confirm filenames, constants and function signatures
-in the current checkout before making a change.
+---
+
+## 17. Final handover checklist
+
+- [ ] Repository cloned and correct branch selected.
+- [ ] Python virtual environment created and activated.
+- [ ] Dependencies installed.
+- [ ] Mosquitto reachable at the configured broker address.
+- [ ] `config.py` checked for local settings.
+- [ ] `main.py` starts successfully.
+- [ ] MQTT IN test passes.
+- [ ] MQTT OUT test passes.
+- [ ] Plate parsing and required space handling verified.
+- [ ] Virtual LED behaviour verified.
+- [ ] Actual COM ports checked.
+- [ ] Bosch camera metadata tested separately from simulated MQTT.
+- [ ] Physical CUSTronics protocol obtained before hardware output.
+- [ ] Barrier authorization, wiring, and safety behaviour verified before physical activation.
+
+**Project status summary:** Simulated MQTT testing and software-level integration are the first milestones. Real camera events, physical LED output, and physical barrier operation must each be verified independently before being reported as operational.
