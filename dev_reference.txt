@@ -15,7 +15,7 @@ Bosch LPR Camera
        | MQTT metadata / JSON
        v
 MQTT Broker (Mosquitto)
-192.168.0.100:1883
+192.168.0.100:1883 // current testing = 172.0.0.1
        |
        | parking/bosch/IN
        | parking/bosch/OUT
