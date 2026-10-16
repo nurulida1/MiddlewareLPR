@@ -23,7 +23,7 @@ CAMERA_ID = os.getenv("CAMERA_ID", "CAM_ENTRY_01")
 # MQTT
 # ============================================================
 
-MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "192.168.0.100")
+MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
 MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
@@ -74,7 +74,7 @@ SHUTDOWN_TIMEOUT = 10
 # ============================================================
 
 LED_SIMULATION_MODE = (
-    os.getenv("LED_SIMULATION_MODE", "false")
+    os.getenv("LED_SIMULATION_MODE", "true") # change to false when use real LED
     .strip()
     .lower()
     in {"1", "true", "yes", "on"}

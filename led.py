@@ -167,18 +167,24 @@ class LEDController:
     
     def connect(self):
         """
-        Start the virtual LED window.
-
-        The COM port is checked by main.py before this method is called.
-        This method does NOT open a physical serial connection.
-        Physical RS485 output remains disabled.
+        Start the simulator only when simulation mode is enabled.
+        Physical mode is blocked until the CUSTronics protocol
+        has been confirmed and implemented.
         """
+        if not LED_SIMULATION_MODE:
+            self.logger.error(
+                "[LED HARDWARE] Physical mode requested, but "
+                "CUSTronics RS485 output is not implemented. "
+                "Connection refused | port=%s",
+                self.port,
+            )
+            return False
+
         if self.gui_thread and self.gui_thread.is_alive():
             return True
 
         self.logger.info(
-            "[LED VIRTUAL] Starting virtual display | "
-            "DIRECTION_PORT=%s | PHYSICAL_OUTPUT=DISABLED",
+            "[LED SIMULATION] Starting virtual display | port=%s",
             self.port,
         )
 
@@ -188,11 +194,32 @@ class LEDController:
         self.gui_thread = Thread(
             target=self._run_virtual_display,
             name=f"LED-Simulator-{self.port}",
-            daemon=True,
+            daemon=True
         )
         self.gui_thread.start()
 
         return True
+
+        # if self.gui_thread and self.gui_thread.is_alive():
+        #     return True
+
+        # self.logger.info(
+        #     "[LED VIRTUAL] Starting virtual display | "
+        #     "DIRECTION_PORT=%s | PHYSICAL_OUTPUT=DISABLED",
+        #     self.port,
+        # )
+
+        # self._stopping = False
+        # self.gui_running = True
+
+        # self.gui_thread = Thread(
+        #     target=self._run_virtual_display,
+        #     name=f"LED-Simulator-{self.port}",
+        #     daemon=True,
+        # )
+        # self.gui_thread.start()
+
+        # return True
     # --------------------------------------------------------
     # VIRTUAL DISPLAY WINDOW
     # --------------------------------------------------------
@@ -402,6 +429,16 @@ class LEDController:
     def _on_canvas_resize(self, _event=None):
         self._draw_display()
 
+
+    def _format_display_text(self, message):
+        """Center short messages and keep long messages ready for scrolling."""
+        message = str(message).upper()
+
+        if len(message) <= COLUMNS:
+            return message.center(COLUMNS)
+
+        return message[:COLUMNS]
+
     # --------------------------------------------------------
     # GUI QUEUE
     # --------------------------------------------------------
@@ -446,7 +483,7 @@ class LEDController:
 
                     if action == "row":
                         self._scroll_states[row_index] = None
-                        self.rows[row_index] = message.center(COLUMNS)
+                        self.rows[row_index] = self._format_display_text(message)
                         self.colours[row_index] = colour
 
                     else:
@@ -454,11 +491,10 @@ class LEDController:
                             "message": message,
                             "position": 0,
                             "colour": colour,
+                            "pause_remaining": 0,
                         }
 
-                        self.rows[row_index] = message[:COLUMNS].ljust(
-                            COLUMNS
-                        )
+                        self.rows[row_index] = message[:COLUMNS].ljust(COLUMNS)
                         self.colours[row_index] = colour
 
                     self._draw_display()
@@ -502,14 +538,16 @@ class LEDController:
 
     def _animate_scroll(self):
         """
-        Show the first 8 characters immediately, then scroll
-        the full message continuously from right to left.
+        Show long messages from right to left in a fixed-width window.
+        Leave a short blank pause before restarting the message.
+        Short, non-scrolling messages remain centered.
         """
 
         if not self.root or not self.gui_running:
             return
 
         changed = False
+        blank_pause_frames = 1
 
         for row_index, state in self._scroll_states.items():
             if state is None:
@@ -518,8 +556,24 @@ class LEDController:
             message = state["message"]
             position = state["position"]
 
-            # Add trailing spaces so the complete message can
-            # leave the display before the next repeat.
+            self.colours[row_index] = state["colour"]
+
+            if position > len(message):
+                self.rows[row_index] = " " * COLUMNS
+
+                pause_remaining = state.get("pause_remaining", 0)
+
+                if pause_remaining >= blank_pause_frames:
+                    # Restart from the beginning after the blank pause.
+                    state["position"] = 0
+                    state["pause_remaining"] = 0
+                else:
+                    state["pause_remaining"] = pause_remaining + 1
+
+                changed = True
+                continue
+
+            # Add spaces so every character can scroll off the panel.
             scrolling_text = message + (" " * COLUMNS)
 
             # Take the next 8-character viewing window.
@@ -528,15 +582,8 @@ class LEDController:
             ]
 
             self.rows[row_index] = visible_text.ljust(COLUMNS)
-            self.colours[row_index] = state["colour"]
 
-            position += 1
-
-            # Restart once the message has fully exited left.
-            if position > len(message):
-                position = 0
-
-            state["position"] = position
+            state["position"] = position + 1
             changed = True
 
         if changed:

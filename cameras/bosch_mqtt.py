@@ -52,6 +52,7 @@ class BoschMQTTListener(BaseCameraListener):
     # ========================================================
 
     def start(self):
+        """Start MQTT listener and retry if broker is unavailable."""
         self.running = True
 
         self.client = mqtt.Client(
@@ -95,10 +96,15 @@ class BoschMQTTListener(BaseCameraListener):
         )
 
         try:
-            self.client.connect(
+            self.client.connect_async(
                 MQTT_BROKER_HOST,
                 MQTT_BROKER_PORT,
                 MQTT_KEEPALIVE,
+            )
+
+            self.logger.info(
+                "MQTT listener started."
+                "Automatic reconnection is enabled."
             )
 
             self.client.loop_forever(
@@ -210,15 +216,28 @@ class BoschMQTTListener(BaseCameraListener):
 
     def _on_message(self, client, userdata, message):
         try:
-            raw_payload = message.payload.decode("utf-8")
+            # Decode the MQTT message.
+            raw_payload = message.payload.decode("utf-8", errors="replace")
 
-            self.logger.debug(
-                "MQTT message received | topic=%s | payload=%s",
-                message.topic,
-                raw_payload,
-            )
+            # Parse JSON once.
+            try:
+                payload = json.loads(raw_payload)
+                
+            except json.JSONDecodeError:
+                self.logger.warning("MQTT RAW NON-JSON INPUT | topic=%s | payload=%s", message.topic, raw_payload)
+                return
 
-            # Determine whether this is an IN or OUT event.
+            # Log full JSON at DEBUG level to avoid cluttering normal logs.
+            formatted_json = json.dumps(payload, indent=4, ensure_ascii=False)
+
+            self.logger.debug("MQTT RAW JSON INPUT | topic=%s\n%s", message.topic, formatted_json)
+
+            # Validate the JSON structure
+            if not isinstance(payload, dict):
+                self.logger.warning("Ignoring non-object JSON payload | topic=%s", message.topic)
+                return
+
+            # Determine whether this is and IN or OUT event.
             direction = self._get_direction(
                 message.topic
             )
@@ -230,15 +249,7 @@ class BoschMQTTListener(BaseCameraListener):
                 )
                 return
 
-            payload = json.loads(raw_payload)
-
-            if not isinstance(payload, dict):
-                self.logger.warning(
-                    "Ignoring non-object JSON payload | topic=%s",
-                    message.topic,
-                )
-                return
-
+            # Extract the license plate.
             event = self._parse_payload(
                 payload,
                 direction=direction,
@@ -270,18 +281,6 @@ class BoschMQTTListener(BaseCameraListener):
 
             # Pass the complete event to the application.
             self.callback(event)
-
-        except UnicodeDecodeError:
-            self.logger.exception(
-                "Invalid UTF-8 MQTT payload | topic=%s",
-                message.topic,
-            )
-
-        except json.JSONDecodeError:
-            self.logger.exception(
-                "Invalid JSON MQTT payload | topic=%s",
-                message.topic,
-            )
 
         except Exception:
             self.logger.exception(
