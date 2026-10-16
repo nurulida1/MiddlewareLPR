@@ -2,7 +2,7 @@ import logging
 import queue
 import threading
 import time
-
+from threading import Lock
 from config import EVENT_QUEUE_SIZE
 
 
@@ -34,21 +34,17 @@ class EventQueue:
         max_size=EVENT_QUEUE_SIZE,
         inactivity_timeout=10.0,
     ):
+        self._lock = Lock()
+        
         self.logger = logging.getLogger(__name__)
 
         self.led_in_controller = led_in_controller
         self.led_out_controller = led_out_controller
 
         self.events = queue.Queue(maxsize=max_size)
-        self.inactivity_timeout = max(
-            0.1,
-            float(inactivity_timeout),
-        )
 
         self._running = False
         self._worker_thread = None
-        self._monitor_thread = None
-        self._lock = threading.Lock()
 
         # Track the active display separately for IN and OUT.
         self._active_displays = {
@@ -83,20 +79,11 @@ class EventQueue:
             daemon=True,
         )
 
-        self._monitor_thread = threading.Thread(
-            target=self._monitor_timeout,
-            name="LEDTimeoutMonitor",
-            daemon=True,
-        )
-
         self._worker_thread.start()
-        self._monitor_thread.start()
 
         self.logger.info(
-            "Event queue started | max_size=%s | "
-            "inactivity_timeout=%.1fs",
-            self.events.maxsize,
-            self.inactivity_timeout,
+            "Event queue started | max_size=%s",
+            self.events.maxsize
         )
 
     # --------------------------------------------------------
@@ -266,60 +253,6 @@ class EventQueue:
             plate,
             generation,
         )
-
-    # --------------------------------------------------------
-    # TIMEOUT MONITOR
-    # --------------------------------------------------------
-
-    def _monitor_timeout(self):
-        while self._running:
-            time.sleep(0.5)
-            self._check_timeout()
-
-    def _check_timeout(self):
-        now = time.monotonic()
-        expired_displays = []
-
-        with self._lock:
-            for direction, state in self._active_displays.items():
-                plate = state["plate"]
-                last_seen = state["last_seen"]
-
-                if plate is None or last_seen is None:
-                    continue
-
-                elapsed = now - last_seen
-
-                if elapsed < self.inactivity_timeout:
-                    continue
-
-                # Invalidate this display's current timeout state.
-                expired_displays.append(
-                    {
-                        "direction": direction,
-                        "plate": plate,
-                        "generation": state["generation"],
-                    }
-                )
-
-                state["plate"] = None
-                state["last_seen"] = None
-
-        for expired in expired_displays:
-            direction = expired["direction"]
-            plate = expired["plate"]
-
-            self.logger.info(
-                "LED inactivity timeout | clearing display | "
-                "direction=%s | last_plate=%s",
-                direction,
-                plate,
-            )
-
-            self._clear_display(
-                direction=direction,
-                expected_generation=expired["generation"],
-            )
 
     # --------------------------------------------------------
     # CLEAR DISPLAY

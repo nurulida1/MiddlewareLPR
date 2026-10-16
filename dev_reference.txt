@@ -327,6 +327,8 @@ net start mosquitto (run cmd as admin)
   -t "parking/bosch/IN" `
   -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
 ```
+//CMD
+"C:\Program Files\Mosquitto\mosquitto_pub.exe" -h 192.168.0.100 -p 1883 -t "parking/bosch/IN" -m "{\"Data\":{\"LicensePlateInfo\":{\"LicensePlateInfo\":{\"PlateNumber\":{\"#text\":\"PUTRAJAYA1234\"}}}}}"
 
 ### Test an OUT event
 
@@ -336,6 +338,9 @@ net start mosquitto (run cmd as admin)
   -t "parking/bosch/OUT" `
   -m '{"Data":{"LicensePlateInfo":{"LicensePlateInfo":{"PlateNumber":{"#text":"PUTRAJAYA1234"}}}}}'
 ```
+
+//CMD
+"C:\Program Files\Mosquitto\mosquitto_pub.exe" -h 192.168.0.100 -p 1883 -t "parking/bosch/OUT" -m "{\"Data\":{\"LicensePlateInfo\":{\"LicensePlateInfo\":{\"PlateNumber\":{\"#text\":\"PUTRAJAYA1234\"}}}}}"
 
 Replace `192.168.0.100` with the actual broker address if needed.
 
@@ -439,6 +444,15 @@ If a port is missing, check the USB adapter, Device Manager, assigned COM number
 **Physical mode:** Requires a confirmed CUSTronics RS485 protocol, including command framing, addressing, row/colour commands, encoding, and any required checksum or acknowledgement.
 
 Do not enable physical serial writes merely because the virtual display works or a COM port is detected.
+
+Example red display command:
+
+ASCII:
+001DIS=QOE INTELLIGENCE0000<CR><LF>
+
+HEX:
+30 30 31 44 49 53 3D 51 4F 45 20 49 4E 54 45 4C
+4C 49 47 45 4E 43 45 30 30 30 30 0D 0A
 
 ---
 

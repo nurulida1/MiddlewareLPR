@@ -133,7 +133,13 @@ FONT_5X7 = {
 class LEDController:
     """Virtual 2x8 display and guarded RS485 connection manager."""
 
-    VALID_COLOURS = {"RED", "GREEN"}
+    VALID_COLOURS = {"RED", "GREEN", "YELLOW"}
+
+    COLOUR_CODES = {
+        "YELLOW": "2200",
+        "GREEN": "1100",
+        "RED": "0000",
+    }
 
     def __init__(self, port=None):
         self.logger = logging.getLogger(__name__)
@@ -167,59 +173,75 @@ class LEDController:
     
     def connect(self):
         """
-        Start the simulator only when simulation mode is enabled.
-        Physical mode is blocked until the CUSTronics protocol
-        has been confirmed and implemented.
+        Connect the CUSTronics LED controller.
+
+        Simulation mode:
+            Starts the virtual LED display without opening a COM port.
+
+        Physical mode:
+            Opens the configured RS485 serial port.
+            The vendor's command protocol must be verified before
+            sending commands to the physical LED panel.
         """
-        if not LED_SIMULATION_MODE:
-            self.logger.error(
-                "[LED HARDWARE] Physical mode requested, but "
-                "CUSTronics RS485 output is not implemented. "
-                "Connection refused | port=%s",
+
+        # Already connected or running.
+        if LED_SIMULATION_MODE:
+            if self.gui_thread and self.gui_thread.is_alive():
+                return True
+
+            self.logger.info(
+                "[LED SIMULATION] Starting virtual display | port=%s",
                 self.port,
             )
-            return False
 
-        if self.gui_thread and self.gui_thread.is_alive():
+            self._stopping = False
+            self.gui_running = True
+
+            self.gui_thread = Thread(
+                target=self._run_virtual_display,
+                name=f"LED-Simulator-{self.port}",
+                daemon=True,
+            )
+            self.gui_thread.start()
+
             return True
 
-        self.logger.info(
-            "[LED SIMULATION] Starting virtual display | port=%s",
-            self.port,
-        )
+        # Physical RS485 mode.
+        if self.serial_connection and self.serial_connection.is_open:
+            return True
 
-        self._stopping = False
-        self.gui_running = True
+        try:
+            self.serial_connection = serial.Serial(
+                port=self.port,
+                baudrate=BAUD_RATE,
+                bytesize=DATA_BITS,
+                parity=PARITY,
+                stopbits=STOP_BITS,
+                timeout=SERIAL_TIMEOUT,
+            )
 
-        self.gui_thread = Thread(
-            target=self._run_virtual_display,
-            name=f"LED-Simulator-{self.port}",
-            daemon=True
-        )
-        self.gui_thread.start()
+            self.logger.info(
+                "[LED HARDWARE] RS485 serial port opened | "
+                "port=%s | baudrate=%s | data_bits=%s | "
+                "parity=%s | stop_bits=%s",
+                self.port,
+                BAUD_RATE,
+                DATA_BITS,
+                PARITY,
+                STOP_BITS,
+            )
 
-        return True
+            return True
 
-        # if self.gui_thread and self.gui_thread.is_alive():
-        #     return True
+        except (SerialException, OSError):
+            self.serial_connection = None
 
-        # self.logger.info(
-        #     "[LED VIRTUAL] Starting virtual display | "
-        #     "DIRECTION_PORT=%s | PHYSICAL_OUTPUT=DISABLED",
-        #     self.port,
-        # )
+            self.logger.exception(
+                "[LED HARDWARE] Failed to open RS485 port | port=%s",
+                self.port,
+            )
 
-        # self._stopping = False
-        # self.gui_running = True
-
-        # self.gui_thread = Thread(
-        #     target=self._run_virtual_display,
-        #     name=f"LED-Simulator-{self.port}",
-        #     daemon=True,
-        # )
-        # self.gui_thread.start()
-
-        # return True
+            return False
     # --------------------------------------------------------
     # VIRTUAL DISPLAY WINDOW
     # --------------------------------------------------------
@@ -641,6 +663,99 @@ class LEDController:
 
         return message, colour
 
+    
+   
+    def _send_rs485_command(self, text, colour):
+        """Send or simulate a CUSTronics display command over RS485."""
+
+        colour = str(colour).strip().upper()
+        colour_code = self.COLOUR_CODES.get(colour)
+
+        if colour_code is None:
+            self.logger.error(
+                "Unsupported LED colour: %s",
+                colour,
+            )
+            return False
+
+        # Normalize and validate display text.
+        text = str(text).strip().upper()
+
+        if not text or not text.isascii():
+            self.logger.error(
+                "Invalid LED text: %r",
+                text,
+            )
+            return False
+
+        if "\r" in text or "\n" in text:
+            self.logger.error(
+                "LED text contains line terminators."
+            )
+            return False
+
+        # Build the exact CUSTronics command.
+        command = f"001DIS={text}{colour_code}\r\n"
+        command_bytes = command.encode("ascii")
+
+        # Log the full command, including CR/LF visibly.
+        self.logger.info(
+            "[LED COMMAND] Port=%s | Colour=%s | ASCII=%s",
+            self.port,
+            colour,
+            repr(command),
+        )
+
+        self.logger.info(
+            "[LED COMMAND] Port=%s | HEX=%s",
+            self.port,
+            command_bytes.hex(" ").upper(),
+        )
+
+        # Simulation: generate and log, but do not transmit.
+        if LED_SIMULATION_MODE:
+            self.logger.info(
+                "[LED SIMULATION] Command generated but NOT transmitted "
+                "| port=%s",
+                self.port,
+            )
+            return True
+
+        # Physical mode: verify the serial connection.
+        if (
+            self.serial_connection is None
+            or not self.serial_connection.is_open
+        ):
+            self.logger.error(
+                "[LED HARDWARE] Serial connection is not open "
+                "| port=%s",
+                self.port,
+            )
+            return False
+
+        # Send command through the RS485 serial adapter.
+        try:
+            bytes_written = self.serial_connection.write(command_bytes)
+            self.serial_connection.flush()
+
+            self.logger.info(
+                "[LED HARDWARE] Command written to serial port "
+                "| port=%s | bytes_written=%s | expected_bytes=%s",
+                self.port,
+                bytes_written,
+                len(command_bytes),
+            )
+
+            return bytes_written == len(command_bytes)
+
+        except (serial.SerialException, OSError):
+            self.logger.exception(
+                "[LED HARDWARE] Failed to send RS485 command "
+                "| port=%s",
+                self.port,
+            )
+            return False
+
     # --------------------------------------------------------
     # DISPLAY TEXT
     # --------------------------------------------------------
@@ -679,6 +794,10 @@ class LEDController:
             return False
 
         message, colour = validated
+
+        # Send the physical command when simulation is disabled.
+        if not self._send_rs485_command(message, colour):
+            return False
 
         if not self.gui_running:
             self.logger.warning(
