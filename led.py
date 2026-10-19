@@ -13,13 +13,14 @@ IMPORTANT:
 Physical LED output remains blocked until the vendor confirms
 the RS485 protocol, row addressing, colour commands and framing.
 
-SIMULATION:
-- IN: Row 1 = plate in RED; Row 2 = WELCOME in GREEN.
-- OUT: Row 1 = plate in RED; Row 2 = THANK YOU in GREEN.
-- Short messages are centered.
-- Long messages start with the first 8 characters visible, then
-  scroll continuously from right to left.
-- Clearing Row 1 clears both rows.
+DISPLAY OPTIONS:
+- FIXED_MESSAGES: existing behaviour; IN uses WELCOME and OUT uses
+  THANK YOU on Row 2, while long Row 1 messages scroll.
+- WRAP_OVERFLOW: no hardcoded greeting and no scrolling on either row.
+  Row 1 shows up to 8 characters in RED; Row 2 shows the next 8 in RED.
+  Text after 16 characters is truncated. A message that fits on Row 1
+  leaves Row 2 blank.
+- Physical RS485 protocol must still be confirmed with CUSTronics.
 """
 
 import logging
@@ -76,6 +77,12 @@ DOT_SPACING = 13
 
 # Move the scrolling message one character every 250 ms.
 SCROLL_INTERVAL_MS = 250
+
+# Select one display behaviour:
+# "FIXED_MESSAGES" = existing IN WELCOME / OUT THANK YOU behaviour
+# "WRAP_OVERFLOW"  = no greeting or scrolling; both rows are RED
+DISPLAY_MODE = "FIXED_MESSAGES"
+VALID_DISPLAY_MODES = {"FIXED_MESSAGES", "WRAP_OVERFLOW"}
 
 
 # ============================================================
@@ -158,7 +165,7 @@ class LEDController:
         self.status_label = None
 
         self.rows = ["", ""]
-        self.colours = ["RED", "GREEN"]
+        self.colours = ["RED", "RED"] if DISPLAY_MODE == "WRAP_OVERFLOW" else ["RED", "GREEN"]
 
         # Scrolling state for row indexes 0 and 1.
         self._scroll_states = {
@@ -698,12 +705,18 @@ class LEDController:
         command = f"001DIS={text}{colour_code}\r\n"
         command_bytes = command.encode("ascii")
 
-        # Log the full command, including CR/LF visibly.
+        # Log the command with readable CR/LF markers.
+        display_ascii = (
+            command
+            .replace("\r", "<CR>")
+            .replace("\n", "<LF>")
+        )
+
         self.logger.info(
-            "[LED COMMAND] Port=%s | Colour=%s | ASCII=%s",
+            "[LED COMMAND] Port=%s | Colour=%s | ASCII='%s'",
             self.port,
             colour,
-            repr(command),
+            display_ascii,
         )
 
         self.logger.info(
@@ -769,33 +782,38 @@ class LEDController:
         row2_message=None,
     ):
         """
-        Display a message on the virtual 2x8 LED.
+        Display text using the selected DISPLAY_MODE.
 
-        IN:
-            Row 1 = plate in RED
-            Row 2 = WELCOME in GREEN
+        FIXED_MESSAGES:
+            Existing behaviour: long messages scroll on Row 1.
+            Row 2 displays the supplied message, or WELCOME when
+            show_welcome=True. The caller can supply THANK YOU for OUT.
 
-        OUT:
-            Row 1 = plate in RED
-            Row 2 = THANK YOU in GREEN
+        WRAP_OVERFLOW:
+            No scrolling and no hardcoded WELCOME / THANK YOU.
+            Row 1 shows the first 8 characters in RED; Row 2 shows the
+            next 8 characters in RED. Characters after position 16 are
+            truncated. Row 2 is blank when there is no overflow.
 
-        For OUT, call:
-            display(plate, row=1, colour="RED",
-                    show_welcome=False, row2_message="THANK YOU")
-
-        Short messages are centered; long messages scroll left.
-
-        Physical RS485 output remains disabled.
+        Physical RS485 output remains subject to vendor protocol
+        confirmation.
         """
 
-        validated = self._validate_message(text, row, colour)
+        mode = str(DISPLAY_MODE).strip().upper()
+        if mode not in VALID_DISPLAY_MODES:
+            self.logger.error(
+                "Invalid DISPLAY_MODE=%r. Use one of %s.",
+                DISPLAY_MODE,
+                sorted(VALID_DISPLAY_MODES),
+            )
+            return False
 
+        validated = self._validate_message(text, row, colour)
         if validated is None:
             return False
 
         message, colour = validated
 
-        # Send the physical command when simulation is disabled.
         if not self._send_rs485_command(message, colour):
             return False
 
@@ -806,66 +824,98 @@ class LEDController:
             )
             return False
 
-        #Display the plate on the requested row.
-        row_index = row - 1
+        if mode == "WRAP_OVERFLOW":
+            # Fixed display only: never enqueue a scrolling action in this mode.
+            # The two physical rows each show at most 8 characters, both RED.
+            first_row = message[:COLUMNS]
+            second_row = message[COLUMNS:COLUMNS * 2]
 
+            self.gui_queue.put(("row", (0, first_row, "RED")))
+
+            if second_row:
+                self.gui_queue.put(("row", (1, second_row, "RED")))
+            else:
+                self.gui_queue.put(("clear", 1))
+
+            if len(message) > COLUMNS * 2:
+                self.logger.warning(
+                    "[LED SIMULATION] Mode=WRAP_OVERFLOW | Port=%s | "
+                    "Text exceeds 16 characters; truncating remainder=%r",
+                    self.port,
+                    message[COLUMNS * 2:],
+                )
+
+            self.logger.info(
+                "[LED SIMULATION] Mode=WRAP_OVERFLOW | Port=%s | "
+                "Row 1 RED=%r | Row 2 RED=%r | scrolling=OFF | ASCII_HEX=%s",
+                self.port,
+                first_row,
+                second_row,
+                message.encode("ascii").hex(" ").upper(),
+            )
+            return True
+
+        if row != 1:
+            row_index = row - 1
+            if len(message) > COLUMNS:
+                self.gui_queue.put(("scroll", (row_index, message, colour)))
+            else:
+                self.gui_queue.put(("row", (row_index, message, colour)))
+            return True
+
+        # FIXED_MESSAGES: preserve the current scrolling behaviour.
         if len(message) > COLUMNS:
-            self.gui_queue.put(("scroll", (row_index, message, colour)))
+            self.gui_queue.put(("scroll", (0, message, colour)))
         else:
-            self.gui_queue.put(("row", (row_index, message, colour)))
+            self.gui_queue.put(("row", (0, message, colour)))
 
         self.logger.info(
-            "[LED SIMULATION] Port=%s | Row %d | Colour=%s | "
-            "Text=%r | Length=%d | ASCII_HEX=%s",
+            "[LED SIMULATION] Mode=FIXED_MESSAGES | Port=%s | "
+            "Row 1 | Colour=%s | Text=%r | Length=%d | ASCII_HEX=%s",
             self.port,
-            row,
             colour,
             message,
             len(message),
             message.encode("ascii").hex(" ").upper(),
         )
 
-        #When displaying a plate on Row 1, update Row 2 as well.
-        if row == 1:
-            if row2_message is None:
-                row2_message = "WELCOME" if show_welcome else None
+        if row2_message is None:
+            row2_message = "WELCOME" if show_welcome else None
 
-            if row2_message:
-                row2_validated = self._validate_message(
-                    row2_message,
-                    row=2,
-                    colour="GREEN",
-                )
+        if row2_message:
+            row2_validated = self._validate_message(
+                row2_message,
+                row=2,
+                colour="GREEN",
+            )
+            if row2_validated is None:
+                return False
 
-                if row2_validated is None:
-                    return False
-
-                second_message, second_colour = row2_validated
-
-                if len(second_message) > COLUMNS:
-                    self.gui_queue.put(("scroll", (1, second_message, second_colour)))
-                else:
-                    self.gui_queue.put(("row", (1, second_message, second_colour)))
-
-                self.logger.info(
-                    "[LED SIMULATION] Port=%s | Row 2 | Colour=%s | "
-                    "Text=%r | Length=%d | ASCII_HEX=%s",
-                    self.port,
-                    second_colour,
-                    second_message,
-                    len(second_message),
-                    second_message.encode("ascii").hex(" ").upper(),
-                )
-
+            second_message, second_colour = row2_validated
+            if len(second_message) > COLUMNS:
+                self.gui_queue.put(("scroll", (1, second_message, second_colour)))
             else:
-                self.gui_queue.put(("clear", 1))
-                self.logger.info(
-                    "[LED VIRTUAL] Port=%s | "
-                    "Row 2 cleared; no message configured.",
-                    self.port,
-                )
+                self.gui_queue.put(("row", (1, second_message, second_colour)))
+
+            self.logger.info(
+                "[LED SIMULATION] Mode=FIXED_MESSAGES | Port=%s | "
+                "Row 2 | Colour=%s | Text=%r | Length=%d | ASCII_HEX=%s",
+                self.port,
+                second_colour,
+                second_message,
+                len(second_message),
+                second_message.encode("ascii").hex(" ").upper(),
+            )
+        else:
+            self.gui_queue.put(("clear", 1))
+            self.logger.info(
+                "[LED SIMULATION] Port=%s | Row 2 cleared; "
+                "no message configured.",
+                self.port,
+            )
+
         return True
-    
+
     # --------------------------------------------------------
     # CLEAR ROW
     # --------------------------------------------------------

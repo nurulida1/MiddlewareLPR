@@ -74,7 +74,7 @@ SHUTDOWN_TIMEOUT = 10
 # ============================================================
 
 LED_SIMULATION_MODE = (
-    os.getenv("LED_SIMULATION_MODE", "true") # change to false when use real LED
+    os.getenv("LED_SIMULATION_MODE", "false") # change to false when use real LED
     .strip()
     .lower()
     in {"1", "true", "yes", "on"}
@@ -124,34 +124,34 @@ STOP_BITS = LED_STOP_BITS
 SERIAL_TIMEOUT = LED_SERIAL_TIMEOUT
 
 
-# ============================================================
-# BARRIER
-# ============================================================
+# # ============================================================
+# # BARRIER
+# # ============================================================
 
-BARRIER_CONTROL_ENABLED = (
-    os.getenv("BARRIER_CONTROL_ENABLED", "false")
-    .strip()
-    .lower()
-    in {"1", "true", "yes", "on"}
-)
+# BARRIER_CONTROL_ENABLED = (
+#     os.getenv("BARRIER_CONTROL_ENABLED", "false")
+#     .strip()
+#     .lower()
+#     in {"1", "true", "yes", "on"}
+# )
 
-BARRIER_RELAY_COM_PORT = os.getenv(
-    "BARRIER_RELAY_COM_PORT",
-    "COM4",
-)
+# BARRIER_RELAY_COM_PORT = os.getenv(
+#     "BARRIER_RELAY_COM_PORT",
+#     "COM4",
+# )
 
-BARRIER_RELAY_PROTOCOL = "UNCONFIRMED"
-BARRIER_RELAY_BAUD_RATE = 9600
-BARRIER_RELAY_SLAVE_ADDRESS = 1
-BARRIER_RELAY_COIL_ADDRESS = 0
-BARRIER_RELAY_PULSE_SECONDS = 0.5
+# BARRIER_RELAY_PROTOCOL = "UNCONFIRMED"
+# BARRIER_RELAY_BAUD_RATE = 9600
+# BARRIER_RELAY_SLAVE_ADDRESS = 1
+# BARRIER_RELAY_COIL_ADDRESS = 0
+# BARRIER_RELAY_PULSE_SECONDS = 0.5
 
-SIMULATE_AUTHORISED_ACCESS = (
-    os.getenv("SIMULATE_AUTHORISED_ACCESS", "false")
-    .strip()
-    .lower()
-    in {"1", "true", "yes", "on"}
-)
+# SIMULATE_AUTHORISED_ACCESS = (
+#     os.getenv("SIMULATE_AUTHORISED_ACCESS", "false")
+#     .strip()
+#     .lower()
+#     in {"1", "true", "yes", "on"}
+# )
 
 
 # ============================================================

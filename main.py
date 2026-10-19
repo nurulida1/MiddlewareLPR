@@ -1,10 +1,10 @@
+
 import logging
 import os
 from logging.handlers import RotatingFileHandler
 
 from config import (
     APP_NAME,
-    SIMULATE_AUTHORISED_ACCESS,
     SITE_ID,
     LANE_ID,
     CAMERA_TYPE,
@@ -14,7 +14,6 @@ from config import (
     LOG_MAX_BYTES,
     LOG_BACKUP_COUNT,
     SHUTDOWN_TIMEOUT,
-    BARRIER_CONTROL_ENABLED,
     LED_IN_SERIAL_PORT,
     LED_OUT_SERIAL_PORT,
     LED_SIMULATION_MODE,
@@ -25,12 +24,19 @@ from processor import PlateProcessor
 from led import LEDController
 from event_queue import EventQueue
 from cameras.factory import create_camera_listener
-from barrier.relay_controller import BarrierRelayController
 
+# BARRIER SUPPORT - TEMPORARILY DISABLED
+# Keep this code commented out until we confirm whether
+# barrier control is required.
+#
+# from config import (
+#     SIMULATE_AUTHORISED_ACCESS,
+#     BARRIER_CONTROL_ENABLED,
+# )
+# from barrier.relay_controller import BarrierRelayController
+#
+# BARRIER_SIMULATION_MODE = True
 
-# SOFTWARE SIMULATION ONLY.
-# This does not control a physical barrier.
-BARRIER_SIMULATION_MODE = True
 
 # Clear the LED after this many seconds without another
 # accepted detection of the active plate.
@@ -233,10 +239,11 @@ def main():
         LED_INACTIVITY_TIMEOUT,
     )
 
-    logger.info(
-        "Barrier simulation mode: %s",
-        BARRIER_SIMULATION_MODE,
-    )
+    # BARRIER SUPPORT - TEMPORARILY DISABLED
+    # logger.info(
+    #     "Barrier simulation mode: %s",
+    #     BARRIER_SIMULATION_MODE,
+    # )
 
     logger.info("=" * 60)
 
@@ -250,8 +257,10 @@ def main():
     led_out = None
 
     camera = None
-    barrier = None
     event_queue = None
+
+    # BARRIER SUPPORT - TEMPORARILY DISABLED
+    # barrier = None
 
     try:
         led_in = initialize_led(
@@ -284,9 +293,8 @@ def main():
             logger.warning(
                 "Physical serial mode is enabled. Opening a "
                 "COM port does not confirm that the LED panel "
-                "works. Physical display commands must remain "
-                "disabled until the CUSTronics RS485 protocol "
-                "is confirmed."
+                "works. Verify the CUSTronics RS485 protocol "
+                "before relying on physical display output."
             )
 
         event_queue = EventQueue(
@@ -296,20 +304,22 @@ def main():
             inactivity_timeout=LED_INACTIVITY_TIMEOUT,
         )
 
-        if BARRIER_SIMULATION_MODE:
-            barrier = BarrierRelayController()
-
-            logger.warning(
-                "Barrier is in SOFTWARE SIMULATION mode. "
-                "No physical gate will be activated."
-            )
-
-        elif BARRIER_CONTROL_ENABLED:
-            logger.critical(
-                "Physical barrier control is not implemented. "
-                "Keep BARRIER_CONTROL_ENABLED=False until relay "
-                "hardware, wiring and authorisation are verified."
-            )
+        # BARRIER SUPPORT - TEMPORARILY DISABLED
+        #
+        # if BARRIER_SIMULATION_MODE:
+        #     barrier = BarrierRelayController()
+        #
+        #     logger.warning(
+        #         "Barrier is in SOFTWARE SIMULATION mode. "
+        #         "No physical gate will be activated."
+        #     )
+        #
+        # elif BARRIER_CONTROL_ENABLED:
+        #     logger.critical(
+        #         "Physical barrier control is not implemented. "
+        #         "Keep BARRIER_CONTROL_ENABLED=False until relay "
+        #         "hardware, wiring and authorisation are verified."
+        #     )
 
         def on_plate_detected(event):
             direction = str(
@@ -368,43 +378,46 @@ def main():
                     selected_port,
                     display_text,
                 )
-            else:
-                queued = event_queue.add(
-                    display_text,
-                    direction=direction,
-                )
+                return
 
-                if not queued:
-                    logger.warning(
-                        "Plate event was not queued | "
-                        "direction=%s | plate=%s",
-                        direction,
-                        display_text,
-                    )
+            queued = event_queue.add(
+                display_text,
+                direction=direction,
+            )
 
-            # A detected plate alone does not prove that
-            # the vehicle is authorised to enter or exit.
-            if SIMULATE_AUTHORISED_ACCESS and barrier is not None:
+            if not queued:
                 logger.warning(
-                    "[TEST ONLY] Simulating authorised access | "
+                    "Plate event was not queued | "
                     "direction=%s | plate=%s",
                     direction,
                     display_text,
                 )
 
-                try:
-                    barrier.trigger_open()
-                except Exception:
-                    logger.exception(
-                        "Simulated barrier action failed."
-                    )
-
-            else:
-                logger.info(
-                    "Barrier not triggered for plate %s: "
-                    "authorisation has not been verified.",
-                    display_text,
-                )
+            # BARRIER SUPPORT - TEMPORARILY DISABLED
+            #
+            # A detected plate alone does not prove that the
+            # vehicle is authorised to enter or exit.
+            #
+            # if SIMULATE_AUTHORISED_ACCESS and barrier is not None:
+            #     logger.warning(
+            #         "[TEST ONLY] Simulating authorised access | "
+            #         "direction=%s | plate=%s",
+            #         direction,
+            #         display_text,
+            #     )
+            #
+            #     try:
+            #         barrier.trigger_open()
+            #     except Exception:
+            #         logger.exception(
+            #             "Simulated barrier action failed."
+            #         )
+            # else:
+            #     logger.info(
+            #         "Barrier not triggered for plate %s: "
+            #         "authorisation has not been verified.",
+            #         display_text,
+            #     )
 
         event_queue.start()
 
@@ -456,13 +469,15 @@ def main():
                     direction,
                 )
 
-        if barrier is not None:
-            try:
-                barrier.stop()
-            except Exception:
-                logger.exception(
-                    "Error stopping barrier controller."
-                )
+        # BARRIER SUPPORT - TEMPORARILY DISABLED
+        #
+        # if barrier is not None:
+        #     try:
+        #         barrier.stop()
+        #     except Exception:
+        #         logger.exception(
+        #             "Error stopping barrier controller."
+        #         )
 
         logger.info("Middleware stopped.")
 
