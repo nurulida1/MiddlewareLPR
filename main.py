@@ -270,12 +270,18 @@ def main():
             available_ports,
         )
 
-        led_out = initialize_led(
-            logger,
-            "OUT",
-            LED_OUT_SERIAL_PORT,
-            available_ports,
+        led_out = led_in
+        logger.info(
+            "Single LED mode | IN and OUT share port=%s",
+            LED_IN_SERIAL_PORT,
         )
+
+        # led_out = initialize_led(
+        #     logger,
+        #     "OUT",
+        #     LED_OUT_SERIAL_PORT,
+        #     available_ports,
+        # )
 
         if led_in is None:
             logger.warning(
@@ -454,10 +460,19 @@ def main():
                     "Error stopping event queue."
                 )
 
-        for direction, controller in (
-            ("IN", led_in),
-            ("OUT", led_out),
-        ):
+        # for direction, controller in (
+        #     ("IN", led_in),
+        #     ("OUT", led_out),
+        # ):
+        for controller in {id(led_in): led_in, id(led_out): led_out}.values():
+            if controller is None:
+                continue
+
+            try:
+                controller.stop()
+            except Exception:
+                logger.exception("Error stopping LED controller.")
+
             if controller is None:
                 continue
 

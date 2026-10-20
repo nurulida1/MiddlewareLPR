@@ -671,101 +671,112 @@ class LEDController:
         return message, colour
 
     
-   
-    def _send_rs485_command(self, text, colour):
-        """Send or simulate a CUSTronics display command over RS485."""
+    def _send_rs485_command(self, text, colour="RED"):
+        """Send a padded CUSTronics LED command over RS485."""
 
-        colour = str(colour).strip().upper()
-        colour_code = self.COLOUR_CODES.get(colour)
-
-        if colour_code is None:
-            self.logger.error(
-                "Unsupported LED colour: %s",
-                colour,
-            )
-            return False
-
-        # Normalize and validate display text.
+        # 1. Normalize the text.
         text = str(text).strip().upper()
 
         if not text or not text.isascii():
             self.logger.error(
-                "Invalid LED text: %r",
+                "[RS485 TX] Invalid LED text: %r",
                 text,
             )
             return False
 
         if "\r" in text or "\n" in text:
             self.logger.error(
-                "LED text contains line terminators."
+                "[RS485 TX] Text must not contain CR/LF: %r",
+                text,
             )
             return False
 
-        # Build the exact CUSTronics command.
+        # 2. Limit the text to the LED's 16-character capacity.
+        if len(text) > 16:
+            self.logger.warning(
+                "[RS485 TX] Text exceeds 16 characters; truncating: %r",
+                text,
+            )
+            text = text[:16]
+
+        # 3. Pad the text with spaces until it contains 16 characters.
+        # Example: "ABC1234" becomes "ABC1234         ".
+        text = text.ljust(16, " ")
+
+        self.logger.info(
+            "[LED TEXT] Prepared text=%r | length=%d",
+            text,
+            len(text),
+        )
+
+        # 4. Select the colour code.
+        colour_codes = {
+            "RED": "0000",
+            "GREEN": "1100",
+            "YELLOW": "2200",
+        }
+
+        colour = str(colour).strip().upper()
+        colour_code = colour_codes.get(colour)
+
+        if colour_code is None:
+            self.logger.error(
+                "[RS485 TX] Unsupported LED colour: %s",
+                colour,
+            )
+            return False
+
+        # 5. Build the command.
+        # \r\n becomes actual bytes 0D 0A when encoded as ASCII.
         command = f"001DIS={text}{colour_code}\r\n"
         command_bytes = command.encode("ascii")
 
-        # Log the command with readable CR/LF markers.
-        display_ascii = (
-            command
-            .replace("\r", "<CR>")
-            .replace("\n", "<LF>")
-        )
-
+        # 6. Log the exact ASCII command and HEX bytes.
         self.logger.info(
-            "[LED COMMAND] Port=%s | Colour=%s | ASCII='%s'",
+            "[RS485 TX] Port=%s | ASCII=%r | HEX=%s",
             self.port,
-            colour,
-            display_ascii,
-        )
-
-        self.logger.info(
-            "[LED COMMAND] Port=%s | HEX=%s",
-            self.port,
+            command,
             command_bytes.hex(" ").upper(),
         )
 
-        # Simulation: generate and log, but do not transmit.
-        if LED_SIMULATION_MODE:
-            self.logger.info(
-                "[LED SIMULATION] Command generated but NOT transmitted "
-                "| port=%s",
-                self.port,
-            )
-            return True
-
-        # Physical mode: verify the serial connection.
+        # 7. Check that the serial port is open.
         if (
             self.serial_connection is None
             or not self.serial_connection.is_open
         ):
             self.logger.error(
-                "[LED HARDWARE] Serial connection is not open "
-                "| port=%s",
+                "[RS485 TX] Serial port is not open: %s",
                 self.port,
             )
             return False
 
-        # Send command through the RS485 serial adapter.
+        # 8. Send the command to the LED.
         try:
             bytes_written = self.serial_connection.write(command_bytes)
             self.serial_connection.flush()
 
             self.logger.info(
-                "[LED HARDWARE] Command written to serial port "
-                "| port=%s | bytes_written=%s | expected_bytes=%s",
-                self.port,
+                "[RS485 TX] Bytes written=%s/%s",
                 bytes_written,
                 len(command_bytes),
             )
 
-            return bytes_written == len(command_bytes)
+            if bytes_written != len(command_bytes):
+                self.logger.error(
+                    "[RS485 TX] Incomplete serial write."
+                )
+                return False
+
+            self.logger.info(
+                "[LED HARDWARE] Command transmitted | port=%s",
+                self.port,
+            )
+
+            return True
 
         except (serial.SerialException, OSError):
             self.logger.exception(
-                "[LED HARDWARE] Failed to send RS485 command "
-                "| port=%s",
-                self.port,
+                "[RS485 TX] Failed to send command"
             )
             return False
 
@@ -814,15 +825,30 @@ class LEDController:
 
         message, colour = validated
 
+        
         if not self._send_rs485_command(message, colour):
             return False
 
+        # Physical mode: the RS485 command has already been sent.
+        # Do not require the virtual display to be running.
+        if not LED_SIMULATION_MODE:
+            self.logger.info(
+                "[LED HARDWARE] Physical display command sent | "
+                "port=%s | row=%s | text=%r",
+                self.port,
+                row,
+                message,
+            )
+            return True
+
+        # Virtual mode requires the simulator window to be running.
         if not self.gui_running:
             self.logger.warning(
                 "[LED VIRTUAL] Display is not running | port=%s",
                 self.port,
             )
             return False
+
 
         if mode == "WRAP_OVERFLOW":
             # Fixed display only: never enqueue a scrolling action in this mode.

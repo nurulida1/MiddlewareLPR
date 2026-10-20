@@ -85,7 +85,7 @@ LED_SIMULATION_MODE = (
 # Change these environment variables if required.
 LED_IN_SERIAL_PORT = os.getenv(
     "LED_IN_SERIAL_PORT",
-    "COM60",
+    "COM61",
 ).strip().upper()
 
 LED_OUT_SERIAL_PORT = os.getenv(
@@ -96,7 +96,7 @@ LED_OUT_SERIAL_PORT = os.getenv(
 # Automatically check whether the configured COM ports
 # exist in Windows when the application starts.
 LED_AUTO_DETECT_PORTS = (
-    os.getenv("LED_AUTO_DETECT_PORTS", "true")
+    os.getenv("LED_AUTO_DETECT_PORTS", "false")
     .strip()
     .lower()
     in {"1", "true", "yes", "on"}
