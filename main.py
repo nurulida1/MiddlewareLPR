@@ -25,23 +25,19 @@ from led import LEDController
 from event_queue import EventQueue
 from cameras.factory import create_camera_listener
 
-# BARRIER SUPPORT - TEMPORARILY DISABLED
-# Keep this code commented out until we confirm whether
-# barrier control is required.
-#
-# from config import (
-#     SIMULATE_AUTHORISED_ACCESS,
-#     BARRIER_CONTROL_ENABLED,
-# )
-# from barrier.relay_controller import BarrierRelayController
-#
-# BARRIER_SIMULATION_MODE = True
 
+# ============================================================
+# LED CONFIGURATION
+# ============================================================
 
 # Clear the LED after this many seconds without another
 # accepted detection of the active plate.
 LED_INACTIVITY_TIMEOUT = 10.0
 
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 def setup_logger():
     os.makedirs(
@@ -79,6 +75,10 @@ def setup_logger():
     return logger
 
 
+# ============================================================
+# COM PORT DETECTION
+# ============================================================
+
 def get_available_com_ports():
     """Return COM port names currently detected by Windows."""
     try:
@@ -98,10 +98,10 @@ def get_available_com_ports():
 
 def validate_led_ports(logger):
     """
-    Report the configured COM ports.
+    Report configured COM ports.
 
-    Missing ports generate warnings instead of stopping
-    the application. Returns the detected port names.
+    Missing ports generate warnings rather than stopping
+    the entire middleware.
     """
 
     if LED_SIMULATION_MODE:
@@ -156,22 +156,27 @@ def validate_led_ports(logger):
     return available_ports
 
 
+# ============================================================
+# LED INITIALIZATION
+# ============================================================
+
 def initialize_led(logger, direction, port, available_ports):
     """
     Initialize one LED controller safely.
 
-    If a port is known to be missing, skip it rather than
-    stopping the entire middleware.
+    Returns the controller on success, otherwise None.
     """
+
+    normalized_port = port.strip().upper()
 
     if (
         not LED_SIMULATION_MODE
         and available_ports is not None
-        and port.strip().upper() not in available_ports
+        and normalized_port not in available_ports
     ):
         logger.warning(
-            "%s LED skipped | port=%s | reason=COM port "
-            "not detected by Windows",
+            "%s LED skipped | port=%s | "
+            "reason=COM port not detected by Windows",
             direction,
             port,
         )
@@ -219,12 +224,20 @@ def initialize_led(logger, direction, port, available_ports):
     return None
 
 
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
 def main():
     logger = setup_logger()
 
     logger.info("=" * 60)
     logger.info("%s starting", APP_NAME)
-    logger.info("Site: %s | Default lane: %s", SITE_ID, LANE_ID)
+    logger.info(
+        "Site: %s | Default lane: %s",
+        SITE_ID,
+        LANE_ID,
+    )
     logger.info("Camera mode: %s", CAMERA_TYPE)
 
     logger.info(
@@ -238,70 +251,65 @@ def main():
         "LED inactivity timeout: %.1fs",
         LED_INACTIVITY_TIMEOUT,
     )
-
-    # BARRIER SUPPORT - TEMPORARILY DISABLED
-    # logger.info(
-    #     "Barrier simulation mode: %s",
-    #     BARRIER_SIMULATION_MODE,
-    # )
-
     logger.info("=" * 60)
 
     available_ports = validate_led_ports(logger)
 
     processor = PlateProcessor()
 
-    # Start only the LED controllers whose ports are available.
-    # A missing COM port must not stop MQTT or the event queue.
+    # Controller references.
     led_in = None
     led_out = None
 
     camera = None
     event_queue = None
 
-    # BARRIER SUPPORT - TEMPORARILY DISABLED
-    # barrier = None
-
     try:
-        led_in = initialize_led(
+        # ----------------------------------------------------
+        # SINGLE PHYSICAL LED
+        # Initialize the panel using the OUT port setting.
+        # Share this controller between IN and OUT.
+        # Do not open the same COM port twice.
+        # ----------------------------------------------------
+
+        led_out = initialize_led(
             logger,
-            "IN",
-            LED_IN_SERIAL_PORT,
+            "OUT",
+            LED_OUT_SERIAL_PORT,
             available_ports,
         )
 
-        led_out = led_in
+        led_in = led_out
+
         logger.info(
             "Single LED mode | IN and OUT share port=%s",
-            LED_IN_SERIAL_PORT,
+            LED_OUT_SERIAL_PORT,
         )
 
-        # led_out = initialize_led(
-        #     logger,
-        #     "OUT",
-        #     LED_OUT_SERIAL_PORT,
-        #     available_ports,
-        # )
-
-        if led_in is None:
-            logger.warning(
-                "IN LED is unavailable. IN events will be "
-                "logged, but cannot be displayed on that LED."
-            )
-
         if led_out is None:
-            logger.warning(
-                "OUT LED is unavailable. OUT events will be "
-                "logged, but cannot be displayed on that LED."
+            logger.error(
+                "LED controller unavailable | port=%s. "
+                "Plate events will be logged but cannot "
+                "be displayed.",
+                LED_OUT_SERIAL_PORT,
+            )
+        else:
+            logger.info(
+                "Shared LED controller ready | port=%s",
+                LED_OUT_SERIAL_PORT,
             )
 
         if not LED_SIMULATION_MODE:
             logger.warning(
                 "Physical serial mode is enabled. Opening a "
-                "COM port does not confirm that the LED panel "
-                "works. Verify the CUSTronics RS485 protocol "
-                "before relying on physical display output."
+                "COM port confirms only that the serial port "
+                "opened, not that the LED panel accepts the "
+                "command protocol."
             )
+
+        # ----------------------------------------------------
+        # EVENT QUEUE
+        # ----------------------------------------------------
 
         event_queue = EventQueue(
             led_in_controller=led_in,
@@ -310,22 +318,9 @@ def main():
             inactivity_timeout=LED_INACTIVITY_TIMEOUT,
         )
 
-        # BARRIER SUPPORT - TEMPORARILY DISABLED
-        #
-        # if BARRIER_SIMULATION_MODE:
-        #     barrier = BarrierRelayController()
-        #
-        #     logger.warning(
-        #         "Barrier is in SOFTWARE SIMULATION mode. "
-        #         "No physical gate will be activated."
-        #     )
-        #
-        # elif BARRIER_CONTROL_ENABLED:
-        #     logger.critical(
-        #         "Physical barrier control is not implemented. "
-        #         "Keep BARRIER_CONTROL_ENABLED=False until relay "
-        #         "hardware, wiring and authorisation are verified."
-        #     )
+        # ----------------------------------------------------
+        # CAMERA / MQTT EVENT CALLBACK
+        # ----------------------------------------------------
 
         def on_plate_detected(event):
             direction = str(
@@ -399,31 +394,9 @@ def main():
                     display_text,
                 )
 
-            # BARRIER SUPPORT - TEMPORARILY DISABLED
-            #
-            # A detected plate alone does not prove that the
-            # vehicle is authorised to enter or exit.
-            #
-            # if SIMULATE_AUTHORISED_ACCESS and barrier is not None:
-            #     logger.warning(
-            #         "[TEST ONLY] Simulating authorised access | "
-            #         "direction=%s | plate=%s",
-            #         direction,
-            #         display_text,
-            #     )
-            #
-            #     try:
-            #         barrier.trigger_open()
-            #     except Exception:
-            #         logger.exception(
-            #             "Simulated barrier action failed."
-            #         )
-            # else:
-            #     logger.info(
-            #         "Barrier not triggered for plate %s: "
-            #         "authorisation has not been verified.",
-            #         display_text,
-            #     )
+        # ----------------------------------------------------
+        # START EVENT QUEUE AND CAMERA LISTENER
+        # ----------------------------------------------------
 
         event_queue.start()
 
@@ -444,6 +417,10 @@ def main():
         logger.exception("Application failed.")
 
     finally:
+        # ----------------------------------------------------
+        # CLEAN SHUTDOWN
+        # ----------------------------------------------------
+
         if camera is not None:
             try:
                 camera.stop()
@@ -460,39 +437,21 @@ def main():
                     "Error stopping event queue."
                 )
 
-        # for direction, controller in (
-        #     ("IN", led_in),
-        #     ("OUT", led_out),
-        # ):
-        for controller in {id(led_in): led_in, id(led_out): led_out}.values():
-            if controller is None:
-                continue
+        # IN and OUT reference the same controller.
+        # Stop that physical controller only once.
+        controllers = {
+            id(controller): controller
+            for controller in (led_in, led_out)
+            if controller is not None
+        }
 
-            try:
-                controller.stop()
-            except Exception:
-                logger.exception("Error stopping LED controller.")
-
-            if controller is None:
-                continue
-
+        for controller in controllers.values():
             try:
                 controller.stop()
             except Exception:
                 logger.exception(
-                    "Error stopping %s LED controller.",
-                    direction,
+                    "Error stopping LED controller."
                 )
-
-        # BARRIER SUPPORT - TEMPORARILY DISABLED
-        #
-        # if barrier is not None:
-        #     try:
-        #         barrier.stop()
-        #     except Exception:
-        #         logger.exception(
-        #             "Error stopping barrier controller."
-        #         )
 
         logger.info("Middleware stopped.")
 

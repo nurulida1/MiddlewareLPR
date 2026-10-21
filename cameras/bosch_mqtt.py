@@ -15,6 +15,7 @@ from config import (
     MQTT_USERNAME,
     MQTT_PASSWORD,
     MQTT_CLIENT_ID,
+    MQTT_TOPIC,
     MQTT_TOPIC_IN,
     MQTT_TOPIC_OUT,
     MQTT_QOS,
@@ -148,6 +149,7 @@ class BoschMQTTListener(BaseCameraListener):
     # MQTT CONNECTION CALLBACK
     # ========================================================
 
+    
     def _on_connect(
         self,
         client,
@@ -169,29 +171,23 @@ class BoschMQTTListener(BaseCameraListener):
             MQTT_BROKER_PORT,
         )
 
-        # Subscribe to both configured topics.
-        for topic, direction in self.topic_directions.items():
-            result, message_id = client.subscribe(
-                topic,
-                qos=MQTT_QOS,
-            )
+        result, message_id = client.subscribe(
+            MQTT_TOPIC,
+            qos=MQTT_QOS,
+        )
 
-            if result == mqtt.MQTT_ERR_SUCCESS:
-                self.logger.info(
-                    "MQTT subscription requested | "
-                    "topic=%s | direction=%s | message_id=%s",
-                    topic,
-                    direction,
-                    message_id,
-                )
-            else:
-                self.logger.error(
-                    "MQTT subscription failed | "
-                    "topic=%s | direction=%s | result=%s",
-                    topic,
-                    direction,
-                    result,
-                )
+        if result == mqtt.MQTT_ERR_SUCCESS:
+            self.logger.info(
+                "MQTT subscription requested | topic=%s | message_id=%s",
+                MQTT_TOPIC,
+                message_id,
+            )
+        else:
+            self.logger.error(
+                "MQTT subscription failed | topic=%s | result=%s",
+                MQTT_TOPIC,
+                result,
+            )
 
     # ========================================================
     # MQTT DISCONNECTION CALLBACK
@@ -237,9 +233,20 @@ class BoschMQTTListener(BaseCameraListener):
                 self.logger.warning("Ignoring non-object JSON payload | topic=%s", message.topic)
                 return
 
+            self.logger.info(
+                "MQTT message received | topic=%s",
+                message.topic,
+            )
+
             # Determine whether this is and IN or OUT event.
             direction = self._get_direction(
                 message.topic
+            )
+
+            self.logger.info(
+                "MQTT direction result | topic=%s | direction=%s",
+                message.topic,
+                direction,
             )
 
             if direction is None:
@@ -292,12 +299,28 @@ class BoschMQTTListener(BaseCameraListener):
     # TOPIC TO DIRECTION
     # ========================================================
 
-    def _get_direction(self, topic):
-        """
-        Map the exact configured MQTT topic to its direction.
-        """
+    
+    
+    def _get_direction(self, topic: str):
+        # Explicitly configured topics
+        if topic == MQTT_TOPIC_IN:
+            return "IN"
 
-        return self.topic_directions.get(topic)
+        if topic == MQTT_TOPIC_OUT:
+            return "OUT"
+
+        # Match the Bosch LPR recognition topic
+        if (
+            "/RuleEngine/Recognition/LicensePlate/" in topic
+            and "LPR-Detector" in topic
+        ):
+            self.logger.info(
+                "Bosch LPR topic matched | topic=%s",
+                topic,
+            )
+            return "IN"  # Use OUT instead if this is the exit camera
+
+        return None
 
     # ========================================================
     # PARSE BOSCH LPR PAYLOAD

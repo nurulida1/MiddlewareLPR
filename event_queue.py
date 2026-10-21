@@ -46,6 +46,8 @@ class EventQueue:
         self._running = False
         self._worker_thread = None
 
+        self._monitor_thread = None
+
         # Track the active display separately for IN and OUT.
         self._active_displays = {
             "IN": {
@@ -180,6 +182,7 @@ class EventQueue:
     # HANDLE EVENT
     # --------------------------------------------------------
 
+    
     def _handle_event(self, event):
         plate = event["plate"]
         direction = event["direction"]
@@ -188,67 +191,49 @@ class EventQueue:
 
         if controller is None:
             self.logger.error(
-                "No LED controller configured | "
-                "direction=%s | plate=%s",
+                "No LED controller configured | direction=%s | plate=%s",
                 direction,
                 plate,
             )
             return
 
-        show_welcome = direction == "IN"
-
-        # Update the timer for this direction only.
         with self._lock:
             display_state = self._active_displays[direction]
-
             display_state["plate"] = plate
             display_state["last_seen"] = time.monotonic()
             display_state["generation"] += 1
-
             generation = display_state["generation"]
 
+        welcome = "WELCOME" if direction == "IN" else "THANKS"
+
         self.logger.info(
-            "LED routing | direction=%s | plate=%s | "
-            "port=%s | welcome=%s",
+            "LED routing | direction=%s | plate=%s | port=%s | message=%s",
             direction,
             plate,
             getattr(controller, "port", "unknown"),
-            show_welcome,
+            welcome,
         )
 
-        # Row 1: plate in RED.
-        # IN shows WELCOME; OUT clears Row 2.
-
-        if direction == "IN":
-            displayed = controller.display(
-                plate,
-                row=1,
-                colour="RED",
-                show_welcome=True,
-                row2_message="WELCOME",
-            )
-        else:
-            displayed = controller.display(
-                plate,
-                row=1,
-                colour="RED",
-                show_welcome=False,
-                row2_message="THANK YOU",
-            )
+        # The current confirmed command format applies one colour
+        # to the complete combined message. Use GREEN until the
+        # vendor confirms the red command.
+        displayed = controller.display(
+            plate,
+            colour="GREEN",
+            show_welcome=True,
+            row2_message=welcome,
+        )
 
         if displayed is False:
             self.logger.error(
-                "LED display request failed | direction=%s | "
-                "plate=%s | port=%s",
+                "LED display request failed | direction=%s | plate=%s",
                 direction,
                 plate,
-                getattr(controller, "port", "unknown"),
             )
             return
 
-        self.logger.debug(
-            "LED display request accepted | direction=%s | "
-            "plate=%s | generation=%s",
+        self.logger.info(
+            "LED display command sent | direction=%s | plate=%s | generation=%s",
             direction,
             plate,
             generation,
