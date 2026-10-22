@@ -18,6 +18,8 @@ from config import (
     LED_OUT_SERIAL_PORT,
     LED_SIMULATION_MODE,
     LED_AUTO_DETECT_PORTS,
+    MQTT_TOPIC_PREFIX_IN,
+    MQTT_TOPIC_PREFIX_OUT,
 )
 
 from processor import PlateProcessor
@@ -30,8 +32,6 @@ from cameras.factory import create_camera_listener
 # LED CONFIGURATION
 # ============================================================
 
-# Clear the LED after this many seconds without another
-# accepted detection of the active plate.
 LED_INACTIVITY_TIMEOUT = 10.0
 
 
@@ -178,16 +178,16 @@ def initialize_led(logger, direction, port, available_ports):
             "%s LED skipped | port=%s | "
             "reason=COM port not detected by Windows",
             direction,
-            port,
+            normalized_port,
         )
         return None
 
-    controller = LEDController(port=port)
+    controller = LEDController(port=normalized_port)
 
     logger.info(
         "Initializing %s LED | port=%s",
         direction,
-        port,
+        normalized_port,
     )
 
     try:
@@ -195,7 +195,7 @@ def initialize_led(logger, direction, port, available_ports):
             logger.info(
                 "%s LED initialized successfully | port=%s",
                 direction,
-                port,
+                normalized_port,
             )
             return controller
 
@@ -203,14 +203,14 @@ def initialize_led(logger, direction, port, available_ports):
             "%s LED initialization failed | port=%s. "
             "Middleware will continue without this LED.",
             direction,
-            port,
+            normalized_port,
         )
 
     except Exception:
         logger.exception(
             "%s LED initialization raised an error | port=%s",
             direction,
-            port,
+            normalized_port,
         )
 
     try:
@@ -257,7 +257,6 @@ def main():
 
     processor = PlateProcessor()
 
-    # Controller references.
     led_in = None
     led_out = None
 
@@ -266,11 +265,20 @@ def main():
 
     try:
         # ----------------------------------------------------
-        # SINGLE PHYSICAL LED
-        # Initialize the panel using the OUT port setting.
-        # Share this controller between IN and OUT.
-        # Do not open the same COM port twice.
+        # INITIALIZE IN AND OUT LED CONTROLLERS
+        #
+        # IN  = COM61
+        # OUT = COM60
+        #
+        # This assumes two independent LED controllers/panels.
         # ----------------------------------------------------
+
+        led_in = initialize_led(
+            logger,
+            "IN",
+            LED_IN_SERIAL_PORT,
+            available_ports,
+        )
 
         led_out = initialize_led(
             logger,
@@ -279,32 +287,29 @@ def main():
             available_ports,
         )
 
-        led_in = led_out
-
         logger.info(
-            "Single LED mode | IN and OUT share port=%s",
+            "Dual LED mode | IN=%s | OUT=%s | simulation=%s",
+            LED_IN_SERIAL_PORT,
             LED_OUT_SERIAL_PORT,
+            LED_SIMULATION_MODE,
         )
+
+        if led_in is None:
+            logger.error(
+                "IN LED unavailable | port=%s",
+                LED_IN_SERIAL_PORT,
+            )
 
         if led_out is None:
             logger.error(
-                "LED controller unavailable | port=%s. "
-                "Plate events will be logged but cannot "
-                "be displayed.",
-                LED_OUT_SERIAL_PORT,
-            )
-        else:
-            logger.info(
-                "Shared LED controller ready | port=%s",
+                "OUT LED unavailable | port=%s",
                 LED_OUT_SERIAL_PORT,
             )
 
         if not LED_SIMULATION_MODE:
             logger.warning(
-                "Physical serial mode is enabled. Opening a "
-                "COM port confirms only that the serial port "
-                "opened, not that the LED panel accepts the "
-                "command protocol."
+                "Physical serial mode is enabled. Opening a COM port "
+                "does not confirm that the LED accepts the command protocol."
             )
 
         # ----------------------------------------------------
@@ -437,8 +442,7 @@ def main():
                     "Error stopping event queue."
                 )
 
-        # IN and OUT reference the same controller.
-        # Stop that physical controller only once.
+        # Stop each controller only once.
         controllers = {
             id(controller): controller
             for controller in (led_in, led_out)

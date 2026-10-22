@@ -150,6 +150,7 @@ class BoschMQTTListener(BaseCameraListener):
     # ========================================================
 
     
+   
     def _on_connect(
         self,
         client,
@@ -171,21 +172,28 @@ class BoschMQTTListener(BaseCameraListener):
             MQTT_BROKER_PORT,
         )
 
-        result, message_id = client.subscribe(
-            MQTT_TOPIC,
-            qos=MQTT_QOS,
-        )
+        # Subscribe to both Bosch cameras.
+        topics = [
+            (MQTT_TOPIC_IN, MQTT_QOS),
+            (MQTT_TOPIC_OUT, MQTT_QOS),
+        ]
+
+        result, message_id = client.subscribe(topics)
 
         if result == mqtt.MQTT_ERR_SUCCESS:
             self.logger.info(
-                "MQTT subscription requested | topic=%s | message_id=%s",
-                MQTT_TOPIC,
+                "MQTT subscriptions requested | "
+                "IN topic=%s | OUT topic=%s | message_id=%s",
+                MQTT_TOPIC_IN,
+                MQTT_TOPIC_OUT,
                 message_id,
             )
         else:
             self.logger.error(
-                "MQTT subscription failed | topic=%s | result=%s",
-                MQTT_TOPIC,
+                "MQTT subscription failed | "
+                "IN topic=%s | OUT topic=%s | result=%s",
+                MQTT_TOPIC_IN,
+                MQTT_TOPIC_OUT,
                 result,
             )
 
@@ -301,27 +309,43 @@ class BoschMQTTListener(BaseCameraListener):
 
     
     
+    # def _get_direction(self, topic: str):
+    #     # Explicitly configured topics
+    #     if topic == MQTT_TOPIC_IN:
+    #         return "IN"
+
+    #     if topic == MQTT_TOPIC_OUT:
+    #         return "OUT"
+
+    #     # Match the Bosch LPR recognition topic
+    #     if (
+    #         "/RuleEngine/Recognition/LicensePlate/" in topic
+    #         and "LPR-Detector" in topic
+    #     ):
+    #         self.logger.info(
+    #             "Bosch LPR topic matched | topic=%s",
+    #             topic,
+    #         )
+    #         return "IN"  # Use OUT instead if this is the exit camera
+
+    #     return None
+
+    
     def _get_direction(self, topic: str):
-        # Explicitly configured topics
-        if topic == MQTT_TOPIC_IN:
+        topic = str(topic or "").strip()
+
+        if topic.startswith(MQTT_TOPIC_PREFIX_IN + "/"):
             return "IN"
 
-        if topic == MQTT_TOPIC_OUT:
+        if topic.startswith(MQTT_TOPIC_PREFIX_OUT + "/"):
             return "OUT"
 
-        # Match the Bosch LPR recognition topic
-        if (
-            "/RuleEngine/Recognition/LicensePlate/" in topic
-            and "LPR-Detector" in topic
-        ):
-            self.logger.info(
-                "Bosch LPR topic matched | topic=%s",
-                topic,
-            )
-            return "IN"  # Use OUT instead if this is the exit camera
-
+        self.logger.debug(
+            "Topic does not match a configured camera prefix | topic=%s",
+            topic,
+        )
         return None
-
+    
     # ========================================================
     # PARSE BOSCH LPR PAYLOAD
     # ========================================================

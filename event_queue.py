@@ -43,6 +43,8 @@ class EventQueue:
 
         self.events = queue.Queue(maxsize=max_size)
 
+        self.inactivity_timeout = float(inactivity_timeout)
+
         self._running = False
         self._worker_thread = None
 
@@ -81,11 +83,19 @@ class EventQueue:
             daemon=True,
         )
 
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_display_timeouts,
+            name="LEDTimeoutMonitor",
+            daemon=True,
+        )
+
         self._worker_thread.start()
+        self._monitor_thread.start()
 
         self.logger.info(
-            "Event queue started | max_size=%s",
-            self.events.maxsize
+            "Event queue started | max_size=%s | inactivity_timeout=%.1fs",
+            self.events.maxsize,
+            self.inactivity_timeout,
         )
 
     # --------------------------------------------------------
@@ -207,11 +217,13 @@ class EventQueue:
         welcome = "WELCOME" if direction == "IN" else "THANKS"
 
         self.logger.info(
-            "LED routing | direction=%s | plate=%s | port=%s | message=%s",
+"LED        routing | direction=%s | plate=%s | port=%s | "
+            "first_8=%s | plate_display=%s",            
             direction,
             plate,
             getattr(controller, "port", "unknown"),
             welcome,
+            plate,
         )
 
         # The current confirmed command format applies one colour
@@ -220,7 +232,7 @@ class EventQueue:
         displayed = controller.display(
             plate,
             colour="GREEN",
-            show_welcome=True,
+            # show_welcome=True,
             row2_message=welcome,
         )
 
@@ -233,9 +245,11 @@ class EventQueue:
             return
 
         self.logger.info(
-            "LED display command sent | direction=%s | plate=%s | generation=%s",
+            "LED display command sent | direction=%s | plate=%s | "
+            "port=%s | generation=%s",
             direction,
             plate,
+            getattr(controller, "port", "unknown"),
             generation,
         )
 
@@ -251,32 +265,30 @@ class EventQueue:
         controller = self._get_led_controller(direction)
 
         if controller is None:
-            self.logger.warning(
-                "Cannot clear display | no controller | "
-                "direction=%s",
+            self.logger.debug(
+                "No LED controller available to clear | direction=%s",
                 direction,
             )
             return False
 
-        # Do not clear a display if a newer event arrived
-        # after the timeout was detected.
+        # Keep the lock during the clear operation. This prevents a new
+        # event from updating the display state halfway through the clear.
         with self._lock:
-            current_state = self._active_displays[direction]
+            state = self._active_displays[direction]
 
-            if (
-                expected_generation is not None
-                and current_state["generation"]
-                != expected_generation
-            ):
-                self.logger.debug(
-                    "Skipped stale timeout clear | "
-                    "direction=%s",
-                    direction,
-                )
-                return False
+            if expected_generation is not None:
+                if state["generation"] != expected_generation:
+                    self.logger.info(
+                        "Skipped stale timeout clear | direction=%s",
+                        direction,
+                    )
+                    return False
+
+            if state["last_seen"] is None:
+                return True
 
         try:
-            cleared = controller.clear(row=1)
+            cleared = controller.clear()
 
             if cleared is False:
                 self.logger.warning(
@@ -287,6 +299,9 @@ class EventQueue:
                 )
                 return False
 
+            state["plate"] = None
+            state["last_seen"] = None
+
             return True
 
         except Exception:
@@ -295,6 +310,44 @@ class EventQueue:
                 direction,
             )
             return False
+
+
+    
+    def _monitor_display_timeouts(self):
+        while self._running:
+            now = time.monotonic()
+
+            for direction in ("IN", "OUT"):
+                should_clear = False
+                generation = None
+
+                with self._lock:
+                    state = self._active_displays[direction]
+                    last_seen = state["last_seen"]
+
+                    if (
+                        last_seen is not None
+                        and now - last_seen >= self.inactivity_timeout
+                    ):
+                        generation = state["generation"]
+                        should_clear = True
+
+                if should_clear:
+                    cleared = self._clear_display(
+                        direction,
+                        expected_generation=generation,
+                    )
+
+                    if cleared:
+                        self.logger.info(
+                            "LED inactivity timeout cleared | "
+                            "direction=%s | timeout=%.1fs",
+                            direction,
+                            self.inactivity_timeout,
+                        )
+
+            time.sleep(0.5)
+
 
     # --------------------------------------------------------
     # STOP

@@ -36,15 +36,16 @@ MQTT_CLIENT_ID = os.getenv(
 
 MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX", "parking/bosch")
 
-MQTT_TOPIC_IN = os.getenv(
-    "MQTT_TOPIC_IN",
-    f"{MQTT_TOPIC_PREFIX}/IN",
+MQTT_TOPIC_PREFIX_IN = os.getenv(
+    "MQTT_TOPIC_PREFIX_IN", "parking/bosch/in"
 )
 
-MQTT_TOPIC_OUT = os.getenv(
-    "MQTT_TOPIC_OUT",
-    f"{MQTT_TOPIC_PREFIX}/OUT",
+MQTT_TOPIC_PREFIX_OUT = os.getenv(
+    "MQTT_TOPIC_PREFIX_OUT", "parking/bosch/out"
 )
+
+MQTT_TOPIC_IN = f"{MQTT_TOPIC_PREFIX_IN}/#"
+MQTT_TOPIC_OUT = f"{MQTT_TOPIC_PREFIX_OUT}/#"
 
 MQTT_TOPIC = os.getenv(
     "MQTT_TOPIC",
@@ -81,7 +82,7 @@ LED_SIMULATION_MODE = (
 )
 
 # Fixed logical roles.
-# COM60 is IN; COM61 is OUT.
+# COM61 is IN; COM60 is OUT.
 # Change these environment variables if required.
 LED_IN_SERIAL_PORT = os.getenv(
     "LED_IN_SERIAL_PORT",
@@ -90,13 +91,13 @@ LED_IN_SERIAL_PORT = os.getenv(
 
 LED_OUT_SERIAL_PORT = os.getenv(
     "LED_OUT_SERIAL_PORT",
-    "COM61",
+    "COM60",
 ).strip().upper()
 
 # Automatically check whether the configured COM ports
 # exist in Windows when the application starts.
 LED_AUTO_DETECT_PORTS = (
-    os.getenv("LED_AUTO_DETECT_PORTS", "false")
+    os.getenv("LED_AUTO_DETECT_PORTS", "true")
     .strip()
     .lower()
     in {"1", "true", "yes", "on"}

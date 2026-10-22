@@ -14,13 +14,17 @@ BAUDRATE = 9600
 ROW_WIDTH = 8
 FRAME_WIDTH = 16
 
-WELCOME_MESSAGE = "THANKS"
+WELCOME_MESSAGE = "WELCOME"
 PLATE_NUMBER = "PUTRAJAYA 1234"
 
 GREEN_SUFFIX = "1100"
 
-DISPLAY_SECONDS = 5
+DISPLAY_SECONDS = 10
 CLEAR_DISPLAY_SECONDS = 1
+
+CLEAR_SUFFIX = "0000"
+CLEAR_RETRY_COUNT = 4
+CLEAR_RETRY_DELAY = 0.3
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +152,31 @@ def send_command(ser, step, message, colour_suffix):
     logger.info("SENT: %d/%d bytes", sent, len(command_bytes))
 
 
+def clear_display(ser):
+    """Send the confirmed 16-space clear command four times."""
+    clear_message = " " * FRAME_WIDTH
+
+    for attempt in range(1, CLEAR_RETRY_COUNT + 1):
+        logger.info(
+            "CLEAR ATTEMPT: %d/%d",
+            attempt,
+            CLEAR_RETRY_COUNT,
+        )
+
+        send_command(
+            ser,
+            f"CLEAR DISPLAY {attempt}/{CLEAR_RETRY_COUNT}",
+            clear_message,
+            CLEAR_SUFFIX,
+        )
+
+        if attempt < CLEAR_RETRY_COUNT:
+            time.sleep(CLEAR_RETRY_DELAY)
+
+    logger.info("All %d clear commands transmitted.", CLEAR_RETRY_COUNT)
+
+
+
 # ============================================================
 # MAIN TEST
 # ============================================================
@@ -181,12 +210,7 @@ def test_led():
 
                 time.sleep(DISPLAY_SECONDS)
 
-                send_command(
-                    ser,
-                    "CLEAR DISPLAY",
-                    "",
-                    "0000",
-                )
+                clear_display(ser)
 
                 time.sleep(CLEAR_DISPLAY_SECONDS)
 
