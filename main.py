@@ -32,7 +32,7 @@ from cameras.factory import create_camera_listener
 # LED CONFIGURATION
 # ============================================================
 
-LED_INACTIVITY_TIMEOUT = 10.0
+LED_INACTIVITY_TIMEOUT = 6.0
 
 
 # ============================================================

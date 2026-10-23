@@ -1,30 +1,23 @@
-
 import logging
 import time
 import serial
-
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-PORT = "COM61"
+PORT = "COM60"
 BAUDRATE = 9600
 
 ROW_WIDTH = 8
-FRAME_WIDTH = 16
 
 WELCOME_MESSAGE = "WELCOME"
 PLATE_NUMBER = "PUTRAJAYA 1234"
 
 GREEN_SUFFIX = "1100"
+RED_SUFFIX = "2200"
 
-DISPLAY_SECONDS = 10
-CLEAR_DISPLAY_SECONDS = 1
-
-CLEAR_SUFFIX = "0000"
-CLEAR_RETRY_COUNT = 4
-CLEAR_RETRY_DELAY = 0.3
+COMMAND_INTERVAL = 4.0
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +49,14 @@ def setup_logging():
 
 
 # ============================================================
-# SHORTEN LONG PLATE NUMBERS
+# SHORTEN PLATE NUMBER
 # ============================================================
 
 def shorten_plate(plate):
     plate = str(plate).strip().upper()
 
-    # Special case: Putrajaya plate
     if plate.startswith("PUTRAJAYA"):
-        # Extract the number after PUTRAJAYA.
         number = plate[len("PUTRAJAYA"):].strip()
-
-        # Example: PUTRAJAYA 1234 -> PUT1234
         shortened = "PUT" + number
 
         if len(shortened) <= ROW_WIDTH:
@@ -78,70 +67,60 @@ def shorten_plate(plate):
             )
             return shortened
 
-    # Normal plates: keep unchanged if they fit.
     if len(plate) <= ROW_WIDTH:
         return plate
 
-    # For other long plates, keep the first 8 characters.
     shortened = plate[:ROW_WIDTH]
 
     logger.info(
-        "Plate exceeds %d characters: %s -> %s",
-        ROW_WIDTH,
+        "Plate shortened: %s -> %s",
         plate,
         shortened,
     )
-
     return shortened
 
 
 # ============================================================
-# BUILD COMBINED DISPLAY MESSAGE
+# BUILD ROW COMMAND
+# Format: 001DIS=MESSAGE1100<CR><LF>
+#          002DIS=MESSAGE2200<CR><LF>
 # ============================================================
 
-def build_display_message(welcome, plate):
-    welcome = str(welcome).strip().upper()
-    plate = shorten_plate(plate)
+def build_row_command(row_number, message, colour_suffix):
+    if row_number not in (1, 2):
+        raise ValueError("Row number must be 1 or 2.")
 
-    if not welcome.isascii() or not plate.isascii():
-        raise ValueError("Messages must contain ASCII characters.")
+    if colour_suffix not in (GREEN_SUFFIX, RED_SUFFIX):
+        raise ValueError("Invalid colour suffix.")
 
-    row1 = welcome[:ROW_WIDTH].ljust(ROW_WIDTH)
-    row2 = plate[:ROW_WIDTH].ljust(ROW_WIDTH)
+    message = str(message).strip().upper()
 
-    combined = row1 + row2
-
-    logger.info("ROW 1: %r", row1)
-    logger.info("ROW 2: %r", row2)
-    logger.info("COMBINED: %r", combined)
-
-    return combined
-
-
-# ============================================================
-# BUILD COMMAND
-# ============================================================
-
-def build_command(message, colour_suffix):
     if not message.isascii():
         raise ValueError("Message must contain ASCII characters.")
 
-    message = message[:FRAME_WIDTH].ljust(FRAME_WIDTH)
+    command = (
+        f"00{row_number}DIS="
+        f"{message}"
+        f"{colour_suffix}\r\n"
+    )
 
-    command = f"001DIS={message}{colour_suffix}\r\n"
     return command.encode("ascii")
 
 
 # ============================================================
-# SEND COMMAND WITH ASCII AND HEX LOGGING
+# SEND COMMAND
 # ============================================================
 
-def send_command(ser, step, message, colour_suffix):
-    command_bytes = build_command(message, colour_suffix)
+def send_row_command(ser, row_number, message, colour_suffix):
+    command_bytes = build_row_command(
+        row_number=row_number,
+        message=message,
+        colour_suffix=colour_suffix,
+    )
 
     logger.info("=" * 60)
-    logger.info("STEP: %s", step)
-    logger.info("DISPLAY TEXT: %r", message)
+    logger.info("ROW: %d", row_number)
+    logger.info("MESSAGE: %s", message)
     logger.info("ASCII: %r", command_bytes.decode("ascii"))
     logger.info("HEX: %s", command_bytes.hex(" ").upper())
     logger.info("BYTE COUNT: %d", len(command_bytes))
@@ -149,36 +128,20 @@ def send_command(ser, step, message, colour_suffix):
     sent = ser.write(command_bytes)
     ser.flush()
 
-    logger.info("SENT: %d/%d bytes", sent, len(command_bytes))
+    logger.info(
+        "SERIAL WRITE: %d/%d bytes",
+        sent,
+        len(command_bytes),
+    )
 
-
-def clear_display(ser):
-    """Send the confirmed 16-space clear command four times."""
-    clear_message = " " * FRAME_WIDTH
-
-    for attempt in range(1, CLEAR_RETRY_COUNT + 1):
-        logger.info(
-            "CLEAR ATTEMPT: %d/%d",
-            attempt,
-            CLEAR_RETRY_COUNT,
-        )
-
-        send_command(
-            ser,
-            f"CLEAR DISPLAY {attempt}/{CLEAR_RETRY_COUNT}",
-            clear_message,
-            CLEAR_SUFFIX,
-        )
-
-        if attempt < CLEAR_RETRY_COUNT:
-            time.sleep(CLEAR_RETRY_DELAY)
-
-    logger.info("All %d clear commands transmitted.", CLEAR_RETRY_COUNT)
-
+    if sent != len(command_bytes):
+        raise IOError("Incomplete serial write.")
 
 
 # ============================================================
 # MAIN TEST
+# 1. ROW 2: PLATE NUMBER IN RED
+# 2. ROW 1: WELCOME IN GREEN
 # ============================================================
 
 def test_led():
@@ -194,32 +157,56 @@ def test_led():
         ) as ser:
 
             logger.info("Connected to %s", PORT)
+            logger.info("Baud rate: %d", BAUDRATE)
 
-            while True:
-                combined_message = build_display_message(
-                    WELCOME_MESSAGE,
-                    PLATE_NUMBER,
-                )
+            # ------------------------------------------------
+            # STEP 1: ROW 2 - PLATE NUMBER IN RED
+            # Expected format:
+            # 002DIS=PUT12342200<CR><LF>
+            # ------------------------------------------------
 
-                send_command(
-                    ser,
-                    "DISPLAY THANKS + SHORTENED PLATE",
-                    combined_message,
-                    GREEN_SUFFIX,
-                )
+            row2_message = shorten_plate(PLATE_NUMBER)
 
-                time.sleep(DISPLAY_SECONDS)
+            send_row_command(
+                ser=ser,
+                row_number=2,
+                message=row2_message,
+                colour_suffix=RED_SUFFIX,
+            )
 
-                clear_display(ser)
+            logger.info(
+                "Waiting %.1f seconds before next command...",
+                COMMAND_INTERVAL,
+            )
+            time.sleep(COMMAND_INTERVAL)
 
-                time.sleep(CLEAR_DISPLAY_SECONDS)
+            # ------------------------------------------------
+            # STEP 2: ROW 1 - WELCOME IN GREEN
+            # Expected format:
+            # 001DIS=WELCOME1100<CR><LF>
+            # ------------------------------------------------
+
+            send_row_command(
+                ser=ser,
+                row_number=1,
+                message=WELCOME_MESSAGE,
+                colour_suffix=GREEN_SUFFIX,
+            )
+
+            logger.info("Both commands sent.")
+            logger.info("No clear command was sent.")
+
+            input(
+                "Check the physical LED display, "
+                "then press Enter to exit..."
+            )
 
     except KeyboardInterrupt:
         logger.info("Test stopped by user.")
 
     except serial.SerialException:
         logger.exception(
-            "Cannot access %s. Close HTerm or other serial programs.",
+            "Cannot access %s. Close HTerm or PowerLED first.",
             PORT,
         )
 
@@ -229,6 +216,10 @@ def test_led():
     finally:
         logger.info("Log file: led_rs485_test.log")
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     setup_logging()

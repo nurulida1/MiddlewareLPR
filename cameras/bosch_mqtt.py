@@ -8,6 +8,7 @@ import paho.mqtt.client as mqtt
 
 from cameras.base import BaseCameraListener
 
+
 from config import (
     CAMERA_ID,
     MQTT_BROKER_HOST,
@@ -18,6 +19,8 @@ from config import (
     MQTT_TOPIC,
     MQTT_TOPIC_IN,
     MQTT_TOPIC_OUT,
+    MQTT_TOPIC_PREFIX_IN,
+    MQTT_TOPIC_PREFIX_OUT,
     MQTT_QOS,
     MQTT_KEEPALIVE,
     MQTT_RECONNECT_MIN_DELAY,

@@ -257,22 +257,16 @@ class EventQueue:
     # CLEAR DISPLAY
     # --------------------------------------------------------
 
-    def _clear_display(
-        self,
-        direction,
-        expected_generation=None,
-    ):
+   
+    
+    def _clear_display(self, direction, expected_generation=None):
         controller = self._get_led_controller(direction)
 
         if controller is None:
-            self.logger.debug(
-                "No LED controller available to clear | direction=%s",
-                direction,
-            )
             return False
 
-        # Keep the lock during the clear operation. This prevents a new
-        # event from updating the display state halfway through the clear.
+        # Check the state under the lock, but do not hold the lock
+        # while transmitting serial commands.
         with self._lock:
             state = self._active_displays[direction]
 
@@ -290,17 +284,27 @@ class EventQueue:
         try:
             cleared = controller.clear()
 
-            if cleared is False:
+            if not cleared:
                 self.logger.warning(
-                    "LED clear request failed | direction=%s | "
-                    "port=%s",
+                    "LED clear request failed | direction=%s",
                     direction,
-                    getattr(controller, "port", "unknown"),
                 )
                 return False
 
-            state["plate"] = None
-            state["last_seen"] = None
+            with self._lock:
+                state = self._active_displays[direction]
+
+                # Do not mark a newer plate event as cleared.
+                if expected_generation is not None:
+                    if state["generation"] != expected_generation:
+                        self.logger.info(
+                            "A newer event arrived during clear | direction=%s",
+                            direction,
+                        )
+                        return False
+
+                state["plate"] = None
+                state["last_seen"] = None
 
             return True
 
@@ -311,8 +315,6 @@ class EventQueue:
             )
             return False
 
-
-    
     def _monitor_display_timeouts(self):
         while self._running:
             now = time.monotonic()
