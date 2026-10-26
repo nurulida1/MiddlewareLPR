@@ -1,7 +1,9 @@
 
 import json
 import logging
+import queue
 import threading
+import time
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -30,31 +32,25 @@ WRITE_TIMEOUT = 2
 SIMULATION = False
 
 DISPLAY_WIDTH = 16
-
 WELCOME = "WELCOME"
 THANKS = "THANKS"
 
-# Keep the existing LED command suffix.
-# Confirm its colour meaning with the LED vendor.
+# Keep the existing suffix; confirm its meaning with the LED vendor.
 DISPLAY_COLOR = "0000"
 
 MAX_RETRIES = 3
-RETRY_DELAY = 1.0
+RETRY_DELAY = 0.2
 
-# Restore WELCOME / THANKS after no new plate for this many seconds.
-DISPLAY_RESET_SECONDS = 3
-
-# Logging retention.
+DISPLAY_RESET_SECONDS = 5
 LOG_BACKUP_DAYS = 1
 
 # ============================================================
-# LOGGING: CONSOLE + DAILY ROTATION
+# LOGGING
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-
 LOG_FILE = LOG_DIR / "middleware.log"
 
 file_handler = TimedRotatingFileHandler(
@@ -65,18 +61,12 @@ file_handler = TimedRotatingFileHandler(
     encoding="utf-8",
     delay=True,
 )
-
 file_handler.suffix = "%Y-%m-%d"
-
-console_handler = logging.StreamHandler()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[
-        console_handler,
-        file_handler,
-    ],
+    handlers=[logging.StreamHandler(), file_handler],
     force=True,
 )
 
@@ -84,24 +74,35 @@ logger = logging.getLogger("simple_led")
 
 logger.info("=" * 70)
 logger.info("Starting Bosch LPR to CUSTronics LED middleware")
-logger.info("Log file: %s", LOG_FILE)
-logger.info("Log retention: %s rotated daily files", LOG_BACKUP_DAYS)
 logger.info("MQTT broker: %s:%s", MQTT_HOST, MQTT_PORT)
-logger.info("MQTT QoS: %s", MQTT_QOS)
-logger.info("IN topic branch: %s/#", TOPIC_IN)
-logger.info("OUT topic branch: %s/#", TOPIC_OUT)
+logger.info("IN topic: %s/#", TOPIC_IN)
+logger.info("OUT topic: %s/#", TOPIC_OUT)
 logger.info("IN LED port: %s", LED_IN_PORT)
 logger.info("OUT LED port: %s", LED_OUT_PORT)
 logger.info("Simulation mode: %s", SIMULATION)
-logger.info("Display reset timeout: %s seconds", DISPLAY_RESET_SECONDS)
+logger.info("Retries: %s | Retry delay: %s seconds",
+            MAX_RETRIES, RETRY_DELAY)
+logger.info("Display reset: %s seconds", DISPLAY_RESET_SECONDS)
 logger.info("=" * 70)
 
-# Prevent LED commands from different threads interleaving.
-display_lock = threading.Lock()
-timer_lock = threading.Lock()
+# ============================================================
+# GLOBAL STATE
+# ============================================================
 
 led_in = None
 led_out = None
+
+# One queue and one worker per lane.
+# A queue holds at most one waiting command.
+command_queues = {
+    "IN": queue.Queue(maxsize=1),
+    "OUT": queue.Queue(maxsize=1),
+}
+
+worker_threads = {}
+
+# Protect timer/generation updates.
+state_lock = threading.Lock()
 
 display_timers = {
     "IN": None,
@@ -112,7 +113,6 @@ display_generations = {
     "IN": 0,
     "OUT": 0,
 }
-
 
 # ============================================================
 # SERIAL CONNECTION
@@ -142,10 +142,16 @@ def open_led(port):
 
     except (serial.SerialException, OSError):
         logger.exception(
-            "Cannot open LED port %s. Other ports and MQTT can continue.",
+            "Cannot open LED port %s. MQTT can continue.",
             port,
         )
         return None
+
+
+def get_lane_connection(direction):
+    if direction == "IN":
+        return led_in, LED_IN_PORT
+    return led_out, LED_OUT_PORT
 
 
 # ============================================================
@@ -153,42 +159,24 @@ def open_led(port):
 # ============================================================
 
 def build_display_text(message, plate=""):
-    message = message.upper().strip()
-
-    # Allow only ASCII letters, digits and spaces in the plate.
+    plate = str(plate or "").upper()
     plate = "".join(
-        char
-        for char in str(plate).upper()
+        char for char in plate
         if char.isascii() and (char.isalnum() or char == " ")
     )
     plate = " ".join(plate.split())
 
-    # Shorten PUTRAJAYA 1234 to PUT 1234 when it fits.
-    if plate.startswith("PUTRAJAYA"):
-        suffix = plate[len("PUTRAJAYA"):].strip()
-        shortened = "PUT" + (f" {suffix}" if suffix else "")
-
+    # Shorten PUTRAJAYA plates if the shortened plate fits the slot.
+    if plate.startswith("PUTRAJAYA "):
+        shortened = "PUT " + plate[len("PUTRAJAYA "):]
         if len(shortened) <= 8:
             plate = shortened
 
-    if plate:
-        if message == THANKS:
-            # OUT: 8-character message slot + up to 8 plate characters.
-            # Example: "THANKS  ABC1234 "
-            message_slot = message.ljust(8)
-            plate = plate[:DISPLAY_WIDTH - len(message_slot)]
-            display_text = message_slot + plate
-
-        else:
-            # IN: WELCOME + one separator + plate.
-            available_plate_chars = DISPLAY_WIDTH - len(message) - 1
-            plate = plate[:available_plate_chars].rstrip()
-            display_text = f"{message} {plate}"
-
+    if message in ("DENIED", THANKS):
+        display_text = f"{message:<8}{plate[:8]:<8}"
     else:
-        display_text = message
+        display_text = f"{message} {plate}"
 
-    # Every LED command contains exactly 16 display characters.
     display_text = display_text[:DISPLAY_WIDTH].ljust(DISPLAY_WIDTH)
 
     logger.info("DISPLAY TEXT: %r", display_text)
@@ -198,41 +186,53 @@ def build_display_text(message, plate=""):
 
 
 # ============================================================
-# SEND LED COMMAND
+# LATEST-MESSAGE-WINS QUEUE
 # ============================================================
 
-def send_led(connection, port, message, plate=""):
-    display_text = build_display_text(message, plate)
+def enqueue_latest(direction, message, plate="", command_type="LED"):
+    """
+    Keep at most one waiting command per lane.
+    Replace a waiting command with the newest one.
+    A command already being transmitted cannot be cancelled.
+    """
+    command_queue = command_queues[direction]
+    item = (message, plate, command_type)
 
-    command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
-    data = command.encode("ascii")
+    while True:
+        try:
+            command_queue.put_nowait(item)
+            break
 
-    logger.info("LED PORT: %s", port)
-    logger.info("LED MESSAGE: %s", message)
-    logger.info("LED PLATE: %s", plate if plate else "(none)")
-    logger.info("LED COLOUR SUFFIX: %s", DISPLAY_COLOR)
-    logger.info("ASCII COMMAND: %r", command)
-    logger.info("HEX BYTES: %s", data.hex(" ").upper())
-    logger.info("BYTE COUNT: %d", len(data))
+        except queue.Full:
+            try:
+                old_item = command_queue.get_nowait()
+                command_queue.task_done()
 
-    if SIMULATION:
-        logger.info("SIMULATION: command not sent to physical LED")
-        return
+                logger.warning(
+                    "REPLACED WAITING %s COMMAND: %s %s",
+                    direction,
+                    old_item[0],
+                    old_item[1] or "(no plate)",
+                )
 
-    if connection is None or not connection.is_open:
-        logger.error(
-            "LED port %s is unavailable. Skipping this command.",
-            port,
-        )
-        return
+            except queue.Empty:
+                # The worker took the item just before we could remove it.
+                continue
 
-    with display_lock:
-        _write_led_command(connection, port, data, "LED")
+    logger.info(
+        "COMMAND QUEUED: lane=%s | type=%s | message=%s | plate=%s",
+        direction,
+        command_type,
+        message,
+        plate or "(none)",
+    )
 
 
-def _write_led_command(connection, port, data, label):
-    """Write a prepared command. Caller must hold display_lock."""
+# ============================================================
+# SERIAL COMMAND TRANSMISSION
+# ============================================================
 
+def write_led_command(connection, port, data, command_type):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             written = connection.write(data)
@@ -240,7 +240,7 @@ def _write_led_command(connection, port, data, label):
 
             logger.info(
                 "%s TRANSMISSION %d/%d: wrote %d/%d bytes on %s",
-                label,
+                command_type,
                 attempt,
                 MAX_RETRIES,
                 written,
@@ -250,7 +250,7 @@ def _write_led_command(connection, port, data, label):
 
             if written != len(data):
                 logger.warning(
-                    "Incomplete write on %s: %d/%d bytes",
+                    "INCOMPLETE WRITE on %s: %d/%d bytes",
                     port,
                     written,
                     len(data),
@@ -263,7 +263,7 @@ def _write_led_command(connection, port, data, label):
         ):
             logger.exception(
                 "%s transmission %d/%d failed on %s",
-                label,
+                command_type,
                 attempt,
                 MAX_RETRIES,
                 port,
@@ -272,7 +272,134 @@ def _write_led_command(connection, port, data, label):
         if attempt < MAX_RETRIES:
             threading.Event().wait(RETRY_DELAY)
 
-    logger.info("Finished sending %s command to %s", label, port)
+    logger.info("FINISHED SENDING %s COMMAND TO %s", command_type, port)
+
+
+def transmit_led_command(direction, message, plate, command_type):
+    connection, port = get_lane_connection(direction)
+
+    display_text = build_display_text(message, plate)
+    command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
+    data = command.encode("ascii")
+
+    logger.info("=" * 70)
+    logger.info("TRANSMITTING COMMAND")
+    logger.info("LANE: %s", direction)
+    logger.info("COMMAND TYPE: %s", command_type)
+    logger.info("LED PORT: %s", port)
+    logger.info("LED MESSAGE: %s", message)
+    logger.info("LED PLATE: %s", plate or "(none)")
+    logger.info("ASCII COMMAND: %r", command)
+    logger.info("HEX BYTES: %s", data.hex(" ").upper())
+    logger.info("BYTE COUNT: %d", len(data))
+
+    if SIMULATION:
+        logger.info("SIMULATION: not sent to physical LED")
+        return
+
+    if connection is None or not connection.is_open:
+        logger.error("LED port %s unavailable; command skipped.", port)
+        return
+
+    logger.warning(
+        ">>> FINAL LED WRITE: lane=%s | type=%s | text=%r",
+        direction,
+        command_type,
+        display_text,
+    )
+
+    write_led_command(connection, port, data, command_type)
+
+# ============================================================
+# ONE SERIAL WORKER PER LANE
+# ============================================================
+
+# def led_worker(direction):
+#     command_queue = command_queues[direction]
+
+#     logger.info("LED WORKER STARTED FOR %s", direction)
+
+#     while True:
+#         item = command_queue.get()
+
+#         try:
+#             if item is None:
+#                 logger.info("LED WORKER STOPPING FOR %s", direction)
+#                 return
+
+#             message, plate, command_type = item
+
+#             transmit_led_command(
+#                 direction,
+#                 message,
+#                 plate,
+#                 command_type,
+#             )
+
+#         except Exception:
+#             logger.exception("Unexpected LED worker error for %s", direction)
+
+#         finally:
+#             command_queue.task_done()
+
+def led_worker(direction):
+    command_queue = command_queues[direction]
+
+    logger.info("LED WORKER STARTED FOR %s", direction)
+
+    while True:
+        item = command_queue.get()
+
+        try:
+            if item is None:
+                logger.info("LED WORKER STOPPING FOR %s", direction)
+                return
+
+            message, plate, command_type = item
+
+            # Send the default message directly after timeout.
+            transmit_led_command(
+                direction,
+                message,
+                plate,
+                command_type,
+            )
+
+        except Exception:
+            logger.exception(
+                "Unexpected LED worker error for %s",
+                direction,
+            )
+
+        finally:
+            command_queue.task_done()
+
+def start_led_workers():
+    for direction in ("IN", "OUT"):
+        worker = threading.Thread(
+            target=led_worker,
+            args=(direction,),
+            name=f"LEDWorker-{direction}",
+            daemon=True,
+        )
+        worker_threads[direction] = worker
+        worker.start()
+
+
+def stop_led_workers():
+    for direction, command_queue in command_queues.items():
+        # Discard any waiting command during shutdown.
+        while True:
+            try:
+                command_queue.get_nowait()
+                command_queue.task_done()
+            except queue.Empty:
+                break
+
+        command_queue.put(None)
+
+    for worker in worker_threads.values():
+        worker.join(timeout=5)
 
 
 # ============================================================
@@ -280,99 +407,70 @@ def _write_led_command(connection, port, data, label):
 # ============================================================
 
 def show_startup_messages():
-    logger.info("=" * 70)
-    logger.info("SHOWING STARTUP MESSAGES")
+    logger.info("QUEUEING STARTUP MESSAGES")
 
-    send_led(led_in, LED_IN_PORT, WELCOME)
-    send_led(led_out, LED_OUT_PORT, THANKS)
-
-    logger.info("Startup message commands completed.")
-    logger.info("Waiting for Bosch plate recognition...")
-    logger.info("=" * 70)
-
-
-def show_startup_message_for_direction(direction):
-    if direction == "IN":
-        send_led(led_in, LED_IN_PORT, WELCOME)
-    elif direction == "OUT":
-        send_led(led_out, LED_OUT_PORT, THANKS)
+    enqueue_latest("IN", WELCOME, command_type="STARTUP")
+    enqueue_latest("OUT", THANKS, command_type="STARTUP")
 
 
 # ============================================================
-# RESTORE STARTUP MESSAGE AFTER TIMEOUT
+# DISPLAY RESET TIMER
 # ============================================================
 
 def reset_display_after_timeout(direction, generation):
-    with display_lock:
-        with timer_lock:
-            # Do not let an outdated timer overwrite a newer plate.
-            if generation != display_generations[direction]:
-                logger.info(
-                    "Ignoring outdated reset timer for %s",
-                    direction,
-                )
-                return
+    with state_lock:
+        if generation != display_generations[direction]:
+            logger.info(
+                "IGNORING OUTDATED RESET TIMER FOR %s",
+                direction,
+            )
+            return
 
-            display_timers[direction] = None
+        display_timers[direction] = None
 
-        logger.info("=" * 70)
+        if direction == "IN":
+            startup_message = WELCOME
+        else:
+            startup_message = THANKS
+
         logger.info(
             "NO NEW %s PLATE EVENT FOR %s SECONDS",
             direction,
             DISPLAY_RESET_SECONDS,
         )
-        logger.info("RESTORING STARTUP MESSAGE FOR %s", direction)
 
-        _send_startup_message_unlocked(direction)
-
-        logger.info("Startup message restored for %s", direction)
-        logger.info("=" * 70)
-
-
-def _send_startup_message_unlocked(direction):
-    """Send a reset command while display_lock is already held."""
-
-    if direction == "IN":
-        connection = led_in
-        port = LED_IN_PORT
-        message = WELCOME
-    else:
-        connection = led_out
-        port = LED_OUT_PORT
-        message = THANKS
-
-    display_text = build_display_text(message)
-    command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
-    data = command.encode("ascii")
-
-    logger.info("RESET LED PORT: %s", port)
-    logger.info("RESET ASCII COMMAND: %r", command)
-    logger.info("RESET HEX BYTES: %s", data.hex(" ").upper())
-    logger.info("RESET BYTE COUNT: %d", len(data))
-
-    if SIMULATION:
-        logger.info("SIMULATION: reset command not sent")
-        return
-
-    if connection is None or not connection.is_open:
-        logger.error(
-            "Cannot reset display; LED port %s is unavailable.",
-            port,
+        # Queue the reset while holding state_lock so a new plate event
+        # cannot interleave between the generation check and enqueue.
+        enqueue_latest(
+            direction,
+            startup_message,
+            command_type="RESET",
         )
-        return
-
-    _write_led_command(connection, port, data, "RESET")
 
 
-def schedule_display_reset(direction):
-    with timer_lock:
+def register_plate_event(direction, message, plate):
+    """
+    Invalidate the old timer, queue the newest plate command,
+    and start a fresh inactivity timer.
+    """
+    with state_lock:
         old_timer = display_timers[direction]
+
+        display_generations[direction] += 1
+        generation = display_generations[direction]
+
+        display_timers[direction] = None
 
         if old_timer is not None:
             old_timer.cancel()
 
-        display_generations[direction] += 1
-        generation = display_generations[direction]
+        # The new plate command replaces any waiting older command.
+        enqueue_latest(
+            direction,
+            message,
+            plate,
+            command_type="PLATE",
+        )
 
         timer = threading.Timer(
             DISPLAY_RESET_SECONDS,
@@ -385,7 +483,13 @@ def schedule_display_reset(direction):
         timer.start()
 
     logger.info(
-        "DISPLAY RESET TIMER STARTED: %s seconds for %s",
+        "NEW %s PLATE REGISTERED: %s | MESSAGE: %s",
+        direction,
+        plate,
+        message,
+    )
+    logger.info(
+        "RESET TIMER STARTED: %s seconds for %s",
         DISPLAY_RESET_SECONDS,
         direction,
     )
@@ -394,6 +498,9 @@ def schedule_display_reset(direction):
 # ============================================================
 # EXTRACT PLATE FROM JSON
 # ============================================================
+
+def normalize_plate(plate):
+    return "".join(str(plate).upper().split())
 
 def find_plate(data):
     if isinstance(data, dict):
@@ -473,9 +580,8 @@ def on_connect(client, userdata, flags, reason_code, properties):
             result,
             message_id,
         )
-        logger.info("Subscribed to: %s/#", TOPIC_IN)
-        logger.info("Subscribed to: %s/#", TOPIC_OUT)
-        logger.info("Waiting for Bosch MQTT events...")
+        logger.info("Subscribed to %s/#", TOPIC_IN)
+        logger.info("Subscribed to %s/#", TOPIC_OUT)
 
     else:
         logger.error("MQTT CONNECTION FAILED: %s", reason_code)
@@ -494,49 +600,62 @@ def on_subscribe(client, userdata, mid, reason_code_list, properties):
 
 
 def on_message(client, userdata, msg):
-    logger.info("MQTT RAW PAYLOAD: %s", msg.payload.decode("utf-8", errors="replace"))
     logger.info("=" * 70)
     logger.info("MQTT MESSAGE RECEIVED")
     logger.info("MQTT TOPIC: %s", msg.topic)
-    logger.info("MQTT MESSAGE QOS: %s", msg.qos)
+    logger.info("MQTT QOS: %s", msg.qos)
+    logger.info("MQTT RETAIN: %s", msg.retain)
 
-    # Do not log the complete raw payload.
-    # Bosch events may contain large base64 images.
+    # Log the complete raw JSON payload exactly as decoded.
     raw = msg.payload.decode("utf-8", errors="replace")
+    logger.info("MQTT RAW JSON: %s", raw)
 
+    # Also log the raw payload as hexadecimal for troubleshooting.
+    logger.info("MQTT RAW HEX: %s", msg.payload.hex(" ").upper())
+    logger.info("MQTT PAYLOAD BYTES: %d", len(msg.payload))
+
+    # Determine direction after logging the raw payload.
     direction = get_direction(msg.topic)
 
     if direction is None:
-        logger.warning(
-            "Cannot determine IN/OUT direction from topic: %s",
-            msg.topic,
-        )
+        logger.warning("Cannot determine lane for topic: %s", msg.topic)
         return
-
-    logger.info("DETECTED TOPIC DIRECTION: %s", direction)
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Payload is not JSON; ignoring this message.")
+        logger.warning("Payload is not JSON; ignoring.")
         return
 
     plate = find_plate(data)
 
     if not plate:
-        logger.info("No plate number in this event. Ignoring non-plate event.")
+        logger.info("No plate number in event; ignoring.")
         return
 
-    plate = plate.upper().strip()
-    logger.info("PLATE FOUND: %s", plate)
+    plate = normalize_plate(plate)
+    logger.info("PLATE FOUND (SPACES REMOVED): %s", plate)
+    
+    event_data = data.get("Data", {})
+    if not isinstance(event_data, dict):
+        event_data = {}
 
-    if direction == "IN":
-        send_led(led_in, LED_IN_PORT, WELCOME, plate)
+    label = str(event_data.get("Label", "")).strip().upper()
+
+    if label == "WHITELIST":
+        message = WELCOME if direction == "IN" else THANKS
     else:
-        send_led(led_out, LED_OUT_PORT, THANKS, plate)
+        message = "DENIED"
 
-    schedule_display_reset(direction)
+    logger.info(
+        "%s DISPLAY RESULT: %s | LABEL: %s | PLATE: %s",
+        direction,
+        message,
+        label or "(missing)",
+        plate,
+    )
 
+    register_plate_event(direction, message, plate)
 
 # ============================================================
 # START APPLICATION
@@ -545,22 +664,26 @@ def on_message(client, userdata, msg):
 def main():
     global led_in, led_out
 
-    led_in = open_led(LED_IN_PORT)
-    led_out = open_led(LED_OUT_PORT)
-
-    show_startup_messages()
-
-    client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id="simple_bosch_led",
-    )
-
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-    client.on_subscribe = on_subscribe
-    client.on_message = on_message
+    client = None
 
     try:
+        led_in = open_led(LED_IN_PORT)
+        led_out = open_led(LED_OUT_PORT)
+
+        # Start workers before queueing startup messages.
+        start_led_workers()
+        show_startup_messages()
+
+        client = mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id="simple_bosch_led",
+        )
+
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.on_subscribe = on_subscribe
+        client.on_message = on_message
+
         logger.info("Connecting MQTT to %s:%s", MQTT_HOST, MQTT_PORT)
 
         client.connect(
@@ -569,6 +692,7 @@ def main():
             keepalive=MQTT_KEEPALIVE,
         )
 
+        logger.info("Waiting for Bosch MQTT events...")
         client.loop_forever()
 
     except KeyboardInterrupt:
@@ -578,16 +702,19 @@ def main():
         logger.exception("Application error")
 
     finally:
-        with timer_lock:
+        with state_lock:
             for direction, timer in display_timers.items():
                 if timer is not None:
                     timer.cancel()
-                    logger.info("Cancelled pending timer for %s", direction)
+                    display_timers[direction] = None
 
-        try:
-            client.disconnect()
-        except Exception:
-            logger.exception("Error disconnecting MQTT client")
+        if client is not None:
+            try:
+                client.disconnect()
+            except Exception:
+                logger.exception("Error disconnecting MQTT client")
+
+        stop_led_workers()
 
         for connection in (led_in, led_out):
             if connection and connection.is_open:
