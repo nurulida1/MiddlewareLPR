@@ -22,7 +22,7 @@ MQTT_QOS = 1
 TOPIC_IN = "parking/bosch/in"
 TOPIC_OUT = "parking/bosch/out"
 
-LED_IN_PORT = "COM60"
+LED_IN_PORT = "COM62"
 LED_OUT_PORT = "COM61"
 
 BAUDRATE = 9600
@@ -36,24 +36,42 @@ LOG_BACKUP_DAYS = 1
 SIMULATION = False
 
 DISPLAY_WIDTH = 16
-WELCOME = "WELCOME"
-THANKS = "THANKS"
 
-PLATE_DISPLAY_SECONDS = 5
+WELCOME = "SELAMAT"
+THANKS = "SELAMAT TINGGAL"
+
+DEFAULT_ROW1 = {
+    "IN": "SELAMAT",
+    "OUT": "TERIMA",
+}
+
+DEFAULT_ROW2 = {
+    "IN": "DATANG",
+    "OUT": "KASIH",
+}
+
+# WELCOME = "WELCOME"
+# THANKS = "THANKS"
+
+PLATE_DISPLAY_SECONDS = 3
 
 # Existing tested command suffix.
 DISPLAY_COLOR = "0000"
 
+DISPLAY_COLOR_DEFAULT = "0000"
+DISPLAY_COLOR_GREEN = "1100"
+DISPLAY_COLOR_RED = "0000"
+
 # Retry incomplete/failed serial writes.
 MAX_RETRIES = 3
-RETRY_DELAY = 0.2
+RETRY_DELAY = 0.04
 
 # Repeat each complete command even after a successful write.
-SEND_REPEAT_COUNT = 4
-SEND_REPEAT_DELAY = 0.2
+SEND_REPEAT_COUNT = 50
+SEND_REPEAT_DELAY = 0.01
 
 # Delay after clearing and before displaying new text.
-CLEAR_SETTLE_DELAY = 0.1
+CLEAR_SETTLE_DELAY = 0.05
 
 # ============================================================
 # LOGGING
@@ -87,9 +105,21 @@ logger = logging.getLogger("simple_led_startup_plate")
 # GLOBAL STATE
 # ============================================================
 
+# current_display = {
+#     "IN": WELCOME,
+#     "OUT": THANKS,
+# }
+
 current_display = {
-    "IN": WELCOME,
-    "OUT": THANKS,
+    "IN": (
+        DEFAULT_ROW1["IN"][:8].ljust(8)
+        + DEFAULT_ROW2["IN"][:8].ljust(8)
+    ),
+
+    "OUT": (
+        DEFAULT_ROW1["OUT"][:8].ljust(8)
+        + DEFAULT_ROW2["OUT"][:8].ljust(8)
+    ),
 }
 
 display_timers = {
@@ -166,7 +196,7 @@ def build_display_text(message):
         if char.isascii() and (char.isalnum() or char == " ")
     )
 
-    text = " ".join(text.split())
+    # Preserve spaces because each row is already formatted.
     result = text[:DISPLAY_WIDTH].ljust(DISPLAY_WIDTH)
 
     logger.info("DISPLAY TEXT: %r", result)
@@ -317,7 +347,10 @@ def send_repeated_command(
 
 def clear_led(connection, port, direction):
     clear_text = " " * DISPLAY_WIDTH
-    clear_command = f"001DIS={clear_text}{DISPLAY_COLOR}\r\n"
+    # clear_command = f"001DIS={clear_text}{DISPLAY_COLOR}\r\n"
+    clear_command = (
+        f"001DIS={clear_text}{DISPLAY_COLOR_DEFAULT}\r\n"
+    )
     clear_data = clear_command.encode("ascii")
 
     logger.info("=" * 70)
@@ -372,6 +405,34 @@ def clear_led(connection, port, direction):
 # PLATE DISPLAY TIMER
 # ============================================================
 
+# Commented 28
+# def restore_startup_display(direction, version):
+#     with state_lock:
+#         if display_versions[direction] != version:
+#             logger.info(
+#                 "%s: ignoring outdated display timer",
+#                 direction,
+#             )
+#             return
+
+#         startup_message = WELCOME if direction == "IN" else THANKS
+
+#         current_display[direction] = startup_message
+#         display_versions[direction] += 1
+#         display_timers[direction] = None
+
+#         logger.info(
+#             "%s TIMEOUT: restoring startup message: %s",
+#             direction,
+#             startup_message,
+#         )
+
+#         enqueue_latest(
+#             direction,
+#             startup_message,
+#             "RESET_TO_STARTUP",
+#         )
+
 def restore_startup_display(direction, version):
     with state_lock:
         if display_versions[direction] != version:
@@ -381,24 +442,20 @@ def restore_startup_display(direction, version):
             )
             return
 
-        startup_message = WELCOME if direction == "IN" else THANKS
+        row1 = center_row(DEFAULT_ROW1[direction])
+        row2 = center_row(DEFAULT_ROW2[direction])
 
-        current_display[direction] = startup_message
+        default_message = row1 + row2
+
         display_versions[direction] += 1
+        current_display[direction] = default_message
         display_timers[direction] = None
-
-        logger.info(
-            "%s TIMEOUT: restoring startup message: %s",
-            direction,
-            startup_message,
-        )
 
         enqueue_latest(
             direction,
-            startup_message,
+            default_message,
             "RESET_TO_STARTUP",
         )
-
 
 # def schedule_startup_restore(direction, message):
 #     logger.info(
@@ -495,14 +552,30 @@ def transmit_led_command(direction, message, command_type):
     #     )
 
     if command_type == "PLATE":
-        display_text = message[:DISPLAY_WIDTH].ljust(DISPLAY_WIDTH)
+        row1 = center_row(message[:8])
+        row2 = center_row(message[8:16])
+        display_text = row1 + row2
 
+        logger.info("ROW 1: %r", row1)
+        logger.info("ROW 2: %r", row2)
         logger.info("DISPLAY TEXT: %r", display_text)
         logger.info("DISPLAY LENGTH: %d", len(display_text))
     else:
         display_text = build_display_text(message)
 
-    command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
+    if command_type == "PLATE":
+        row1_text = message[:8].strip().upper()
+
+        if row1_text == "KKR":
+            color_code = DISPLAY_COLOR_GREEN
+        elif row1_text == "DENIED":
+            color_code = DISPLAY_COLOR_RED
+        else:
+            color_code = DISPLAY_COLOR_DEFAULT
+    else:
+        color_code = DISPLAY_COLOR_DEFAULT
+
+    command = f"001DIS={display_text}{color_code}\r\n"
     data = command.encode("ascii")
 
     logger.info("ASCII COMMAND: %r", command)
@@ -631,12 +704,17 @@ def clear_startup_panels():
 
     time.sleep(CLEAR_SETTLE_DELAY)
 
+# Commented 28/10 5.30pm
 
 def show_startup_messages():
-    logger.info("DISPLAYING STARTUP MESSAGES ON BOTH LED PANELS")
+    logger.info("DISPLAYING DEFAULT MESSAGES")
 
     for direction in ("IN", "OUT"):
-        startup_message = WELCOME if direction == "IN" else THANKS
+
+        row1 = center_row(DEFAULT_ROW1[direction])
+        row2 = center_row(DEFAULT_ROW2[direction])
+
+        default_message = row1 + row2
 
         with state_lock:
             timer = display_timers[direction]
@@ -646,17 +724,82 @@ def show_startup_messages():
                 display_timers[direction] = None
 
             display_versions[direction] += 1
-            current_display[direction] = startup_message
+            current_display[direction] = default_message
+
+        # connection, port = get_lane_connection(direction)
+
+        # if not SIMULATION and connection is not None and connection.is_open:
+        #     clear_led(connection, port, direction)
+        #     time.sleep(CLEAR_SETTLE_DELAY)
 
         transmit_led_command(
             direction,
-            startup_message,
+            default_message,
             "STARTUP",
         )
+
+# def show_startup_messages():
+#     logger.info("DISPLAYING STARTUP MESSAGES ON BOTH LED PANELS")
+
+#     for direction in ("IN", "OUT"):
+#         startup_message = WELCOME if direction == "IN" else THANKS
+
+#         with state_lock:
+#             timer = display_timers[direction]
+
+#             if timer is not None:
+#                 timer.cancel()
+#                 display_timers[direction] = None
+
+#             display_versions[direction] += 1
+#             current_display[direction] = startup_message
+
+#         transmit_led_command(
+#             direction,
+#             startup_message,
+#             "STARTUP",
+#         )
 
 # ============================================================
 # REGISTER PLATE EVENT
 # ============================================================
+
+# Commented 28/10 : 5.24pm
+# def register_plate_event(direction, message, plate):
+#     plate = normalize_plate(plate)
+
+#     if not plate:
+#         logger.info(
+#             "EMPTY PLATE IGNORED: keeping %s display unchanged",
+#             direction,
+#         )
+#         return
+
+#     # Format the message into two 8-character rows:
+#     # Row 1: WELCOME / THANKS / DENIED
+#     # Row 2: Plate number
+#     if message in ("WELCOME", "THANKS", "DENIED"):
+#         message = f"{message:<8}{plate[:8]:<8}"
+#     else:
+#         message = f"{message} {plate}"
+
+#     with state_lock:
+#         display_versions[direction] += 1
+
+#         old_timer = display_timers[direction]
+#         if old_timer is not None:
+#             old_timer.cancel()
+#             display_timers[direction] = None
+
+#         current_display[direction] = message
+#         enqueue_latest(direction, message, "PLATE")
+
+#     logger.info(
+#         "PLATE EVENT: lane=%s | plate=%s | message=%r",
+#         direction,
+#         plate,
+#         message,
+#     )
 
 
 def register_plate_event(direction, message, plate):
@@ -669,36 +812,39 @@ def register_plate_event(direction, message, plate):
         )
         return
 
-    # Format the message into two 8-character rows:
-    # Row 1: WELCOME / THANKS / DENIED
-    # Row 2: Plate number
-    if message in ("WELCOME", "THANKS", "DENIED"):
-        message = f"{message:<8}{plate[:8]:<8}"
-    else:
-        message = f"{message} {plate}"
+    row1 = center_row("KKR" if message == "KKR" else "DENIED")
+    row2 = center_row(plate)
+
+    display_message = row1 + row2
 
     with state_lock:
         display_versions[direction] += 1
 
         old_timer = display_timers[direction]
+
         if old_timer is not None:
             old_timer.cancel()
             display_timers[direction] = None
 
-        current_display[direction] = message
-        enqueue_latest(direction, message, "PLATE")
+        current_display[direction] = display_message
+
+        enqueue_latest(
+            direction,
+            display_message,
+            "PLATE",
+        )
 
     logger.info(
-        "PLATE EVENT: lane=%s | plate=%s | message=%r",
+        "PLATE EVENT: lane=%s | row1=%r | row2=%r",
         direction,
-        plate,
-        message,
+        row1,
+        row2,
     )
 
 def send_display_frame(connection, port, row1, row2):
     display_text = (
-        row1[:8].ljust(8)
-        + row2[:8].ljust(8)
+        center_row(row1)
+        + center_row(row2)
     )
 
     command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
@@ -884,7 +1030,7 @@ def on_message(client, userdata, msg):
     label = str(event_data.get("Label", "")).strip().upper()
 
     if label == "WHITELIST":
-        message = WELCOME if direction == "IN" else THANKS
+        message = "KKR"
     else:
         message = "DENIED"
 
@@ -899,6 +1045,11 @@ def on_message(client, userdata, msg):
     register_plate_event(direction, message, plate)
 
 
+def center_row(message, width=8):
+    text = str(message or "").strip().upper()
+    text = text[:width]
+    return text.ljust(width)
+
 # ============================================================
 # START APPLICATION
 # ============================================================
@@ -912,14 +1063,17 @@ def main():
         logger.info("=" * 70)
         logger.info("Starting LED startup + plate display test")
         logger.info(
-            "IN LED: %s | startup message: %s",
+            "IN LED: %s | default: %s / %s",
             LED_IN_PORT,
-            WELCOME,
+            DEFAULT_ROW1["IN"],
+            DEFAULT_ROW2["IN"],
         )
+
         logger.info(
-            "OUT LED: %s | startup message: %s",
+            "OUT LED: %s | default: %s / %s",
             LED_OUT_PORT,
-            THANKS,
+            DEFAULT_ROW1["OUT"],
+            DEFAULT_ROW2["OUT"],
         )
         logger.info("Simulation mode: %s", SIMULATION)
         logger.info("Display width: %s", DISPLAY_WIDTH)
