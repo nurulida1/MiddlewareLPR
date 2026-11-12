@@ -29,16 +29,11 @@ BAUDRATE = 9600
 SERIAL_TIMEOUT = 1
 WRITE_TIMEOUT = 2
 
-LOG_BACKUP_DAYS = 1
-
 # True = simulation without physical COM ports.
 # False = use physical LED panels.
 SIMULATION = False
 
 DISPLAY_WIDTH = 16
-
-WELCOME = "SELAMAT"
-THANKS = "SELAMAT TINGGAL"
 
 DEFAULT_ROW1 = {
     "IN": "SELAMAT",
@@ -56,8 +51,6 @@ DEFAULT_ROW2 = {
 PLATE_DISPLAY_SECONDS = 3
 
 # Existing tested command suffix.
-DISPLAY_COLOR = "0000"
-
 DISPLAY_COLOR_DEFAULT = "0000"
 DISPLAY_COLOR_GREEN = "1100"
 DISPLAY_COLOR_RED = "0000"
@@ -67,8 +60,10 @@ MAX_RETRIES = 3
 RETRY_DELAY = 0.04
 
 # Repeat each complete command even after a successful write.
-SEND_REPEAT_COUNT = 50
-SEND_REPEAT_DELAY = 0.01
+# SEND_REPEAT_COUNT = 50
+# SEND_REPEAT_DELAY = 0.01
+SEND_REPEAT_COUNT = 3
+SEND_REPEAT_DELAY = 0.05
 
 # Delay after clearing and before displaying new text.
 CLEAR_SETTLE_DELAY = 0.05
@@ -79,27 +74,67 @@ CLEAR_SETTLE_DELAY = 0.05
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "simple_led_startup_plate.log"
 
-file_handler = TimedRotatingFileHandler(
-    filename=str(LOG_FILE),
-    when="midnight",
-    interval=1,
-    backupCount=LOG_BACKUP_DAYS,
-    encoding="utf-8",
-    delay=True,
-)
-file_handler.suffix = "%Y-%m-%d"
+LOG_BACKUP_COUNT = 7
 
+def create_lane_logger(direction):
+    lane_log_dir = LOG_DIR / direction
+    lane_log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = lane_log_dir / f"simple_led_{direction.lower()}.log"
+
+    lane_logger = logging.getLogger(
+        f"simple_led_{direction.lower()}"
+    )
+
+    lane_logger.setLevel(logging.INFO)
+    lane_logger.propagate = False
+
+    # Avoid duplicate handlers if logger is initialized again.
+    if not lane_logger.handlers:
+        file_handler = TimedRotatingFileHandler(
+            filename=str(log_file),
+            when="midnight",
+            interval=1,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+            delay=True,
+        )
+
+        file_handler.suffix = "%Y-%m-%d"
+
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s"
+        )
+
+        file_handler.setFormatter(formatter)
+        lane_logger.addHandler(file_handler)
+
+    return lane_logger
+
+
+# Separate loggers
+logger_in = create_lane_logger("IN")
+logger_out = create_lane_logger("OUT")
+
+# General application logger (console only)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(), file_handler],
+    handlers=[logging.StreamHandler()],
     force=True,
 )
 
 logger = logging.getLogger("simple_led_startup_plate")
+
+def get_lane_logger(direction):
+    if direction == "IN":
+        return logger_in
+
+    if direction == "OUT":
+        return logger_out
+
+    raise ValueError(f"Invalid LED direction: {direction}")
 
 # ============================================================
 # GLOBAL STATE
@@ -181,14 +216,20 @@ def get_lane_connection(direction):
     if direction == "IN":
         return led_in, LED_IN_PORT
 
-    return led_out, LED_OUT_PORT
+    if direction == "OUT":
+        return led_out, LED_OUT_PORT
+
+    raise ValueError(f"Invalid LED direction: {direction}")
+
 
 
 # ============================================================
 # DISPLAY TEXT: EXACTLY 16 CHARACTERS
 # ============================================================
 
-def build_display_text(message):
+def build_display_text(message, direction):
+    lane_logger = get_lane_logger(direction)
+
     text = str(message or "").upper()
 
     text = "".join(
@@ -196,11 +237,10 @@ def build_display_text(message):
         if char.isascii() and (char.isalnum() or char == " ")
     )
 
-    # Preserve spaces because each row is already formatted.
     result = text[:DISPLAY_WIDTH].ljust(DISPLAY_WIDTH)
 
-    logger.info("DISPLAY TEXT: %r", result)
-    logger.info("DISPLAY LENGTH: %d", len(result))
+    lane_logger.info("DISPLAY TEXT: %r", result)
+    lane_logger.info("DISPLAY LENGTH: %d", len(result))
 
     return result
 
@@ -210,6 +250,8 @@ def build_display_text(message):
 # ============================================================
 
 def enqueue_latest(direction, message, command_type):
+    lane_logger = get_lane_logger(direction)
+
     command_queue = command_queues[direction]
     item = (message, command_type)
 
@@ -223,7 +265,7 @@ def enqueue_latest(direction, message, command_type):
                 old_item = command_queue.get_nowait()
                 command_queue.task_done()
 
-                logger.warning(
+                lane_logger.warning(
                     "REPLACED WAITING %s COMMAND: %s (%s)",
                     direction,
                     old_item[0],
@@ -233,32 +275,48 @@ def enqueue_latest(direction, message, command_type):
             except queue.Empty:
                 continue
 
-    logger.info(
+    lane_logger.info(
         "COMMAND QUEUED: lane=%s | type=%s | message=%s",
         direction,
         command_type,
         message,
     )
 
-
 # ============================================================
 # SERIAL COMMAND TRANSMISSION
 # ============================================================
 
-def write_led_command(connection, port, data, command_type):
-    attempts = (
-        MAX_RETRIES
-        if command_type in ("RESET_TO_STARTUP", "CLEAR")
-        else 1
-    )
+def write_led_command(connection, port, data, command_type, direction):
+    lane_logger = get_lane_logger(direction)
+
+    attempts = MAX_RETRIES
 
     for attempt in range(1, attempts + 1):
         try:
             written = connection.write(data)
             connection.flush()
 
-            logger.info(
-                "%s WRITE ATTEMPT %d/%d: %d/%d bytes on %s",
+            if written == len(data):
+                lane_logger.info(
+                    "SERIAL WRITE SUCCESS: "
+                    "lane=%s | command=%s | attempt=%d/%d | "
+                    "bytes=%d/%d | port=%s",
+                    direction,
+                    command_type,
+                    attempt,
+                    attempts,
+                    written,
+                    len(data),
+                    port,
+                )
+
+                return True
+
+            lane_logger.warning(
+                "SERIAL WRITE INCOMPLETE: "
+                "lane=%s | command=%s | attempt=%d/%d | "
+                "bytes=%d/%d | port=%s",
+                direction,
                 command_type,
                 attempt,
                 attempts,
@@ -267,28 +325,15 @@ def write_led_command(connection, port, data, command_type):
                 port,
             )
 
-            if written == len(data):
-                logger.info(
-                    "SERIAL WRITE SUCCESS: %s on %s",
-                    command_type,
-                    port,
-                )
-                return True
-
-            logger.warning(
-                "INCOMPLETE WRITE on %s: %d/%d bytes",
-                port,
-                written,
-                len(data),
-            )
-
         except (
             serial.SerialException,
             serial.SerialTimeoutException,
             OSError,
         ):
-            logger.exception(
-                "%s write attempt %d/%d failed on %s",
+            lane_logger.exception(
+                "SERIAL WRITE ERROR: "
+                "lane=%s | command=%s | attempt=%d/%d | port=%s",
+                direction,
                 command_type,
                 attempt,
                 attempts,
@@ -298,14 +343,46 @@ def write_led_command(connection, port, data, command_type):
         if attempt < attempts:
             time.sleep(RETRY_DELAY)
 
-    logger.error(
-        "SERIAL WRITE FAILED: %s after %d attempt(s) on %s",
+    lane_logger.error(
+        "SERIAL WRITE FAILED AFTER ALL RETRIES: "
+        "lane=%s | command=%s | port=%s",
+        direction,
         command_type,
-        attempts,
         port,
     )
 
     return False
+
+# def send_repeated_command(
+#     connection,
+#     port,
+#     data,
+#     command_type,
+# ):
+#     all_successful = True
+
+#     for attempt in range(1, SEND_REPEAT_COUNT + 1):
+#         logger.info(
+#             "%s SEND %d/%d",
+#             command_type,
+#             attempt,
+#             SEND_REPEAT_COUNT,
+#         )
+
+#         success = write_led_command(
+#             connection,
+#             port,
+#             data,
+#             command_type,
+#         )
+
+#         if not success:
+#             all_successful = False
+
+#         if attempt < SEND_REPEAT_COUNT:
+#             time.sleep(SEND_REPEAT_DELAY)
+
+#     return all_successful
 
 
 def send_repeated_command(
@@ -313,15 +390,28 @@ def send_repeated_command(
     port,
     data,
     command_type,
+    direction,
 ):
+    lane_logger = get_lane_logger(direction)
+
     all_successful = True
 
-    for attempt in range(1, SEND_REPEAT_COUNT + 1):
-        logger.info(
-            "%s SEND %d/%d",
-            command_type,
-            attempt,
+    lane_logger.info(
+        "START REPEATED TRANSMISSION: "
+        "lane=%s | command=%s | repeat_count=%d",
+        direction,
+        command_type,
+        SEND_REPEAT_COUNT,
+    )
+
+    for repeat in range(1, SEND_REPEAT_COUNT + 1):
+
+        lane_logger.info(
+            "TRANSMISSION %d/%d: %s on %s",
+            repeat,
             SEND_REPEAT_COUNT,
+            command_type,
+            port,
         )
 
         success = write_led_command(
@@ -329,77 +419,130 @@ def send_repeated_command(
             port,
             data,
             command_type,
+            direction,
         )
 
         if not success:
             all_successful = False
 
-        if attempt < SEND_REPEAT_COUNT:
+        if repeat < SEND_REPEAT_COUNT:
             time.sleep(SEND_REPEAT_DELAY)
 
-    return all_successful
+    if all_successful:
+        lane_logger.info(
+            "ALL SERIAL TRANSMISSIONS COMPLETED: "
+            "lane=%s | command=%s | transmissions=%d",
+            direction,
+            command_type,
+            SEND_REPEAT_COUNT,
+        )
+    else:
+        lane_logger.error(
+            "SERIAL TRANSMISSION WARNING: "
+            "lane=%s | command=%s | at least one transmission failed",
+            direction,
+            command_type,
+        )
 
+    lane_logger.info(
+        "PHYSICAL LED DISPLAY STATUS: UNCONFIRMED "
+        "(no display acknowledgement available)"
+    )
+
+    return all_successful
 
 # ============================================================
 # CLEAR LED PANEL
 # ============================================================
 
 
+# def clear_led(connection, port, direction):
+#     clear_text = " " * DISPLAY_WIDTH
+#     # clear_command = f"001DIS={clear_text}{DISPLAY_COLOR}\r\n"
+#     clear_command = (
+#         f"001DIS={clear_text}{DISPLAY_COLOR_DEFAULT}\r\n"
+#     )
+#     clear_data = clear_command.encode("ascii")
+
+#     logger.info("=" * 70)
+#     logger.info("SENDING REPEATED CLEAR COMMANDS")
+#     logger.info("LANE: %s", direction)
+#     logger.info("LED PORT: %s", port)
+#     logger.info("CLEAR ASCII: %r", clear_command)
+#     logger.info("CLEAR HEX: %s", clear_data.hex(" ").upper())
+#     logger.info("CLEAR BYTE COUNT: %d", len(clear_data))
+
+#     all_writes_successful = True
+
+#     for attempt in range(1, SEND_REPEAT_COUNT + 1):
+#         logger.info(
+#             "CLEAR SEND %d/%d on %s",
+#             attempt,
+#             SEND_REPEAT_COUNT,
+#             port,
+#         )
+
+#         success = write_led_command(
+#             connection,
+#             port,
+#             clear_data,
+#             "CLEAR",
+#         )
+
+#         if not success:
+#             all_writes_successful = False
+
+#         if attempt < SEND_REPEAT_COUNT:
+#             time.sleep(SEND_REPEAT_DELAY)
+
+#     time.sleep(CLEAR_SETTLE_DELAY)
+
+#     if all_writes_successful:
+#         logger.info(
+#             "%s: all clear-command writes succeeded; "
+#             "physical clearing is unconfirmed",
+#             direction,
+#         )
+#     else:
+#         logger.warning(
+#             "%s: one or more clear-command writes failed",
+#             direction,
+#         )
+
+#     return all_writes_successful
+
+
 def clear_led(connection, port, direction):
+    lane_logger = get_lane_logger(direction)
+
     clear_text = " " * DISPLAY_WIDTH
-    # clear_command = f"001DIS={clear_text}{DISPLAY_COLOR}\r\n"
+
     clear_command = (
         f"001DIS={clear_text}{DISPLAY_COLOR_DEFAULT}\r\n"
     )
+
     clear_data = clear_command.encode("ascii")
 
-    logger.info("=" * 70)
-    logger.info("SENDING REPEATED CLEAR COMMANDS")
-    logger.info("LANE: %s", direction)
-    logger.info("LED PORT: %s", port)
-    logger.info("CLEAR ASCII: %r", clear_command)
-    logger.info("CLEAR HEX: %s", clear_data.hex(" ").upper())
-    logger.info("CLEAR BYTE COUNT: %d", len(clear_data))
+    lane_logger.info("=" * 70)
+    lane_logger.info("CLEARING LED PANEL: %s", direction)
+    lane_logger.info("CLEAR COMMAND: %r", clear_command)
 
-    all_writes_successful = True
-
-    for attempt in range(1, SEND_REPEAT_COUNT + 1):
-        logger.info(
-            "CLEAR SEND %d/%d on %s",
-            attempt,
-            SEND_REPEAT_COUNT,
-            port,
-        )
-
-        success = write_led_command(
-            connection,
-            port,
-            clear_data,
-            "CLEAR",
-        )
-
-        if not success:
-            all_writes_successful = False
-
-        if attempt < SEND_REPEAT_COUNT:
-            time.sleep(SEND_REPEAT_DELAY)
+    success = send_repeated_command(
+        connection,
+        port,
+        clear_data,
+        "CLEAR",
+        direction,
+    )
 
     time.sleep(CLEAR_SETTLE_DELAY)
 
-    if all_writes_successful:
-        logger.info(
-            "%s: all clear-command writes succeeded; "
-            "physical clearing is unconfirmed",
-            direction,
-        )
+    if success:
+        lane_logger.info("%s: clear transmissions completed", direction)
     else:
-        logger.warning(
-            "%s: one or more clear-command writes failed",
-            direction,
-        )
+        lane_logger.error("%s: clear transmission failed", direction)
 
-    return all_writes_successful
-
+    return success
 
 # ============================================================
 # PLATE DISPLAY TIMER
@@ -434,9 +577,11 @@ def clear_led(connection, port, direction):
 #         )
 
 def restore_startup_display(direction, version):
+    lane_logger = get_lane_logger(direction)
+
     with state_lock:
         if display_versions[direction] != version:
-            logger.info(
+            lane_logger.info(
                 "%s: ignoring outdated display timer",
                 direction,
             )
@@ -456,7 +601,6 @@ def restore_startup_display(direction, version):
             default_message,
             "RESET_TO_STARTUP",
         )
-
 # def schedule_startup_restore(direction, message):
 #     logger.info(
 #         "%s: temporary stay mode enabled; "
@@ -467,6 +611,8 @@ def restore_startup_display(direction, version):
 
 
 def schedule_startup_restore(direction, message):
+    lane_logger = get_lane_logger(direction)
+
     with state_lock:
         if current_display[direction] != message:
             return
@@ -488,7 +634,7 @@ def schedule_startup_restore(direction, message):
         display_timers[direction] = timer
         timer.start()
 
-        logger.info(
+        lane_logger.info(
             "%s: restore startup message in %s seconds",
             direction,
             PLATE_DISPLAY_SECONDS,
@@ -500,21 +646,23 @@ def schedule_startup_restore(direction, message):
 # ============================================================
 
 def transmit_led_command(direction, message, command_type):
+    lane_logger = get_lane_logger(direction)
+
     connection, port = get_lane_connection(direction)
 
-    logger.info("=" * 70)
-    logger.info("PREPARING LED COMMAND")
-    logger.info("LANE: %s", direction)
-    logger.info("COMMAND TYPE: %s", command_type)
-    logger.info("LED PORT: %s", port)
-    logger.info("DISPLAY MESSAGE: %s", message)
+    lane_logger.info("=" * 70)
+    lane_logger.info("PREPARING LED COMMAND")
+    lane_logger.info("LANE: %s", direction)
+    lane_logger.info("COMMAND TYPE: %s", command_type)
+    lane_logger.info("LED PORT: %s", port)
+    lane_logger.info("DISPLAY MESSAGE: %s", message)
 
     if not str(message or "").strip():
-        logger.warning("Empty message; keeping current display.")
+        lane_logger.warning("Empty message; keeping current display.")
         return
 
     if SIMULATION:
-        logger.info(
+        lane_logger.info(
             "SIMULATION: would display %s on %s",
             message,
             direction,
@@ -526,7 +674,7 @@ def transmit_led_command(direction, message, command_type):
         return
 
     if connection is None or not connection.is_open:
-        logger.error(
+        lane_logger.error(
             "LED port %s unavailable; command skipped.",
             port,
         )
@@ -536,14 +684,12 @@ def transmit_led_command(direction, message, command_type):
     # Plate and reset messages clear the old display first.
     if command_type != "STARTUP":
         if not clear_led(connection, port, direction):
-            logger.error(
+            lane_logger.error(
                 "Clear failed; skipping message %s on %s",
                 message,
-                direction,
+                port,
             )
             return
-
-        time.sleep(CLEAR_SETTLE_DELAY)
 
     # if command_type != "STARTUP":
     #     logger.info(
@@ -556,12 +702,12 @@ def transmit_led_command(direction, message, command_type):
         row2 = center_row(message[8:16])
         display_text = row1 + row2
 
-        logger.info("ROW 1: %r", row1)
-        logger.info("ROW 2: %r", row2)
-        logger.info("DISPLAY TEXT: %r", display_text)
-        logger.info("DISPLAY LENGTH: %d", len(display_text))
+        lane_logger.info("ROW 1: %r", row1)
+        lane_logger.info("ROW 2: %r", row2)
+        lane_logger.info("DISPLAY TEXT: %r", display_text)
+        lane_logger.info("DISPLAY LENGTH: %d", len(display_text))
     else:
-        display_text = build_display_text(message)
+        display_text = build_display_text(message, direction)
 
     if command_type == "PLATE":
         row1_text = message[:8].strip().upper()
@@ -578,19 +724,20 @@ def transmit_led_command(direction, message, command_type):
     command = f"001DIS={display_text}{color_code}\r\n"
     data = command.encode("ascii")
 
-    logger.info("ASCII COMMAND: %r", command)
-    logger.info("HEX BYTES: %s", data.hex(" ").upper())
-    logger.info("BYTE COUNT: %d", len(data))
+    lane_logger.info("ASCII COMMAND: %r", command)
+    lane_logger.info("HEX BYTES: %s", data.hex(" ").upper())
+    lane_logger.info("BYTE COUNT: %d", len(data))
 
     success = send_repeated_command(
         connection,
         port,
         data,
-        command_type,
+        command_type,    
+        direction,
     )
 
     if success:
-        logger.info(
+        lane_logger.info(
             "ALL DISPLAY SENDS COMPLETED: lane=%s | message=%s",
             direction,
             message,
@@ -600,7 +747,7 @@ def transmit_led_command(direction, message, command_type):
             schedule_startup_restore(direction, message)
 
     else:
-        logger.error(
+        lane_logger.error(
             "ONE OR MORE DISPLAY SENDS FAILED: lane=%s | message=%s",
             direction,
             message,
@@ -612,16 +759,17 @@ def transmit_led_command(direction, message, command_type):
 # ============================================================
 
 def led_worker(direction):
+    lane_logger = get_lane_logger(direction)
     command_queue = command_queues[direction]
 
-    logger.info("LED WORKER STARTED FOR %s", direction)
+    lane_logger.info("LED WORKER STARTED FOR %s", direction)
 
     while True:
         item = command_queue.get()
 
         try:
             if item is None:
-                logger.info("LED WORKER STOPPING FOR %s", direction)
+                lane_logger.info("LED WORKER STOPPING FOR %s", direction)
                 return
 
             message, command_type = item
@@ -633,14 +781,13 @@ def led_worker(direction):
             )
 
         except Exception:
-            logger.exception(
+            lane_logger.exception(
                 "Unexpected LED worker error for %s",
                 direction,
             )
 
         finally:
             command_queue.task_done()
-
 
 def start_led_workers():
     for direction in ("IN", "OUT"):
@@ -655,6 +802,7 @@ def start_led_workers():
         worker.start()
 
 
+
 def stop_led_workers():
     # Cancel outstanding timers during shutdown.
     with state_lock:
@@ -663,6 +811,7 @@ def stop_led_workers():
                 timer.cancel()
                 display_timers[direction] = None
 
+    # Remove pending commands and enqueue shutdown signals.
     for command_queue in command_queues.values():
         while True:
             try:
@@ -673,9 +822,14 @@ def stop_led_workers():
 
         command_queue.put(None)
 
-    for worker in worker_threads.values():
-        worker.join(timeout=5)
+    # Wait until each worker finishes its current transmission.
+    for direction, worker in worker_threads.items():
+        worker.join()
 
+        logger.info(
+            "LED WORKER STOPPED: %s",
+            direction,
+        )
 
 # ============================================================
 # STARTUP MESSAGES
@@ -683,6 +837,12 @@ def stop_led_workers():
 
 def clear_startup_panels():
     logger.info("CLEARING BOTH LED PANELS BEFORE STARTUP")
+
+    if SIMULATION:
+        logger.info(
+            "SIMULATION: skipping physical LED panel clearing"
+        )
+        return
 
     for direction in ("IN", "OUT"):
         connection, port = get_lane_connection(direction)
@@ -698,9 +858,17 @@ def clear_startup_panels():
         success = clear_led(connection, port, direction)
 
         if success:
-            logger.info("%s PANEL CLEARED: %s", direction, port)
+            logger.info(
+                "%s PANEL CLEAR TRANSMISSIONS COMPLETED: %s",
+                direction,
+                port,
+            )
         else:
-            logger.error("%s PANEL CLEAR FAILED: %s", direction, port)
+            logger.error(
+                "%s PANEL CLEAR FAILED: %s",
+                direction,
+                port,
+            )
 
     time.sleep(CLEAR_SETTLE_DELAY)
 
@@ -803,10 +971,12 @@ def show_startup_messages():
 
 
 def register_plate_event(direction, message, plate):
+    lane_logger = get_lane_logger(direction)
+
     plate = normalize_plate(plate)
 
     if not plate:
-        logger.info(
+        lane_logger.info(
             "EMPTY PLATE IGNORED: keeping %s display unchanged",
             direction,
         )
@@ -834,34 +1004,36 @@ def register_plate_event(direction, message, plate):
             "PLATE",
         )
 
-    logger.info(
+    lane_logger.info(
         "PLATE EVENT: lane=%s | row1=%r | row2=%r",
         direction,
         row1,
         row2,
     )
 
-def send_display_frame(connection, port, row1, row2):
+def send_display_frame(connection, port, row1, row2, direction):
+    lane_logger = get_lane_logger(direction)
+
     display_text = (
         center_row(row1)
         + center_row(row2)
     )
 
-    command = f"001DIS={display_text}{DISPLAY_COLOR}\r\n"
+    command = f"001DIS={display_text}{DISPLAY_COLOR_DEFAULT}\r\n"
     data = command.encode("ascii")
 
-    logger.info("SCROLL FRAME ASCII: %r", command)
-    logger.info("SCROLL FRAME TEXT: %r", display_text)
-    logger.info("SCROLL FRAME HEX: %s", data.hex(" ").upper())
-    logger.info("SCROLL FRAME BYTE COUNT: %d", len(data))
+    lane_logger.info("SCROLL FRAME ASCII: %r", command)
+    lane_logger.info("SCROLL FRAME TEXT: %r", display_text)
+    lane_logger.info("SCROLL FRAME HEX: %s", data.hex(" ").upper())
+    lane_logger.info("SCROLL FRAME BYTE COUNT: %d", len(data))
 
     return send_repeated_command(
         connection,
         port,
         data,
         "PLATE",
+        direction,
     )
-
 # ============================================================
 # EXTRACT PLATE FROM JSON
 # ============================================================
@@ -949,8 +1121,6 @@ def on_connect(
         subscriptions = [
             (TOPIC_IN + "/#", MQTT_QOS),
             (TOPIC_OUT + "/#", MQTT_QOS),
-            (TOPIC_IN, MQTT_QOS),
-            (TOPIC_OUT, MQTT_QOS),
         ]
 
         result, message_id = client.subscribe(subscriptions)
@@ -959,6 +1129,12 @@ def on_connect(
             "MQTT SUBSCRIBE REQUEST: result=%s, message_id=%s",
             result,
             message_id,
+        )
+
+        logger.info(
+            "MQTT LISTENING TO: %s and %s",
+            TOPIC_IN + "/#",
+            TOPIC_OUT + "/#",
         )
 
     else:
@@ -991,39 +1167,58 @@ def on_subscribe(
 
 
 def on_message(client, userdata, msg):
-    logger.info("=" * 70)
-    logger.info("MQTT MESSAGE RECEIVED")
-    logger.info("MQTT TOPIC: %s", msg.topic)
-    logger.info("MQTT QOS: %s", msg.qos)
-    logger.info("MQTT RETAIN: %s", msg.retain)
-
-    raw = msg.payload.decode("utf-8", errors="replace")
-    logger.info("MQTT RAW JSON: %s", raw)
-    logger.info("MQTT RAW HEX: %s", msg.payload.hex(" ").upper())
-    logger.info("MQTT PAYLOAD BYTES: %d", len(msg.payload))
-
     direction = get_direction(msg.topic)
 
+    logger.info(
+        "MQTT ROUTING: topic=%s | direction=%s",
+        msg.topic,
+        direction or "UNKNOWN",
+    )
+
     if direction is None:
-        logger.warning("Cannot determine lane for topic: %s", msg.topic)
+        logger.warning(
+            "UNKNOWN MQTT TOPIC RECEIVED: %s",
+            msg.topic,
+        )
+        logger.warning(
+            "UNKNOWN MQTT PAYLOAD: %s",
+            msg.payload.decode("utf-8", errors="replace"),
+        )
         return
+
+    lane_logger = get_lane_logger(direction)
+
+    lane_logger.info("=" * 70)
+    lane_logger.info("MQTT MESSAGE RECEIVED")
+    lane_logger.info("LANE: %s", direction)
+    lane_logger.info("MQTT TOPIC: %s", msg.topic)
+    lane_logger.info("MQTT QOS: %s", msg.qos)
+    lane_logger.info("MQTT RETAIN: %s", msg.retain)
+
+    raw = msg.payload.decode("utf-8", errors="replace")
+
+    lane_logger.info("MQTT RAW JSON: %s", raw)
+    lane_logger.info("MQTT RAW HEX: %s", msg.payload.hex(" ").upper())
+    lane_logger.info("MQTT PAYLOAD BYTES: %d", len(msg.payload))
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Payload is not JSON; ignoring.")
+        lane_logger.warning("Payload is not JSON; ignoring.")
         return
 
     plate = find_plate(data)
 
     if not plate:
-        logger.info("No plate number in event; ignoring.")
+        lane_logger.info("No plate number in event; ignoring.")
         return
 
     plate = normalize_plate(plate)
-    logger.info("PLATE FOUND (SPACES REMOVED): %s", plate)
 
-    event_data = data.get("Data", {})
+    lane_logger.info("PLATE FOUND (SPACES REMOVED): %s", plate)
+
+    event_data = data.get("Data", {}) if isinstance(data, dict) else {}
+
     if not isinstance(event_data, dict):
         event_data = {}
 
@@ -1034,7 +1229,7 @@ def on_message(client, userdata, msg):
     else:
         message = "DENIED"
 
-    logger.info(
+    lane_logger.info(
         "%s DISPLAY RESULT: %s | LABEL: %s | PLATE: %s",
         direction,
         message,
@@ -1044,11 +1239,15 @@ def on_message(client, userdata, msg):
 
     register_plate_event(direction, message, plate)
 
+# def center_row(message, width=8):
+#     text = str(message or "").strip().upper()
+#     text = text[:width]
+#     return text.ljust(width)
 
 def center_row(message, width=8):
     text = str(message or "").strip().upper()
     text = text[:width]
-    return text.ljust(width)
+    return text.center(width)
 
 # ============================================================
 # START APPLICATION
